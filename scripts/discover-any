@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /opt/fieldtool/config.env
+SCRIPTS="/opt/fieldtool/scripts"
+
+LOG="/var/log/fieldtool/discover_$(date +%F_%H-%M-%S).log"
+CSV="/var/log/fieldtool/discover_$(date +%F_%H-%M-%S).csv"
+RANGES=("$@")
+[ ${#RANGES[@]} -eq 0 ] && RANGES=("192.168.0.0/24" "192.168.1.0/24" "10.0.0.0/24" "172.16.0.0/24")
+
+echo "ip,hostname,mac,vendor" | tee "$CSV" >/dev/null
+echo "[INFO] Ranges: ${RANGES[*]}" | tee "$LOG"
+
+iface="$("$SCRIPTS/iface-detect")"
+echo "[INFO] Using interface: $iface" | tee -a "$LOG"
+
+has_addr_in_subnet_24() {
+  local net="$1" ; local prefix="${net%.*}"
+  ip -o addr show dev "$iface" | grep -qF "$prefix."
+}
+
+for net in "${RANGES[@]}"; do
+  echo -e "\n=== $net ===" | tee -a "$LOG"
+
+  auto_added=""
+  if [[ "$net" =~ /24$ ]] && ! has_addr_in_subnet_24 "$net"; then
+    echo "[INFO] Not on $net; adding temporary alias..." | tee -a "$LOG"
+    added=$("$SCRIPTS/ip-alias" add "auto:$net" "$iface" | awk -F= "/ADDED_ALIAS/{print \$2}")
+    auto_added="$added"
+    auto_added="$net"
+  fi
+
+  base="${net%/*}"; start="${base%.*}.0"; end="${base%.*}.255"
+
+  # 1) Fast sweep
+  mapfile -t ALIVE < <(fping -a -q -g "$start" "$end" 2>/dev/null || true)
+
+  # 2) Fallback ping-scan
+  if [ ${#ALIVE[@]} -eq 0 ]; then
+    mapfile -t ALIVE < <(nmap -sn -n -PE -PA21,22,80,443 --min-rate 1000 --max-retries 1 --host-timeout 200ms "$net" \
+      | awk '/Nmap scan report/{print $5}')
+  fi
+
+  # 3) Last resort: treat as up and probe TCP (catches ping-blockers)
+  if [ ${#ALIVE[@]} -eq 0 ]; then
+    mapfile -t ALIVE < <(nmap -Pn -n --min-rate 800 --max-retries 1 -p 80,443,22 --open "$net" \
+      | awk '/Nmap scan report/{print $5}')
+  fi
+
+  if [ ${#ALIVE[@]} -eq 0 ]; then
+    echo "[INFO] No hosts found on $net" | tee -a "$LOG"
+    [ -n "$auto_added" ] && "$SCRIPTS/ip-alias" del "$auto_added" "$iface" >/dev/null || true
+    continue
+  fi
+
+  echo "[INFO] Alive: ${#ALIVE[@]} hosts" | tee -a "$LOG"
+
+  for ip in "${ALIVE[@]}"; do
+    hostn=$(nmap -sn -n --max-retries 0 --host-timeout 200ms "$ip" 2>/dev/null | awk '/Nmap scan report/{print $6}' | tr -d '()' || true)
+    mac=""; vendor=""
+    # Only try ARP vendor if we're actually on the subnet
+    if [[ "$net" =~ /24$ ]] && has_addr_in_subnet_24 "$net"; then
+      line=$(sudo arp-scan --interface="$iface" --retry=1 --timeout=50 "$ip" 2>/dev/null | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/{print}')
+      mac=$(awk '{print $2}' <<<"$line")
+      vendor=$(awk '{$1=$2=""; sub(/^  /,""); print}' <<<"$line")
+    fi
+    echo "$ip,${hostn:-},${mac:-},${vendor:-}" | tee -a "$CSV" >/dev/null
+    printf "%-16s %-30s %-20s %s\n" "$ip" "${hostn:-}" "${mac:-}" "${vendor:-}" | tee -a "$LOG"
+  done
+
+  [ -n "$auto_added" ] && { echo "[INFO] Removing temporary alias for $net" | tee -a "$LOG"; "$SCRIPTS/ip-alias" del "$auto_added" "$iface" | tee -a "$LOG" || true; }
+done
+
+echo "[INFO] Saved log: $LOG"
+echo "[INFO] Saved CSV: $CSV"

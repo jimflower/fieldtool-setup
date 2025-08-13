@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usage: reverse-tunnel start|stop
+set -euo pipefail
+. /opt/fieldtool/config.env
+
+[ -z "$SUPPORT_HOST" ] && { echo "Set SUPPORT_HOST in /opt/fieldtool/config.env"; exit 2; }
+SSHCMD="ssh -i $SUPPORT_KEY -N -R ${SUPPORT_PORT}:localhost:22 ${SUPPORT_USER}@${SUPPORT_HOST}"
+PIDFILE="/run/fieldtool-revtun.pid"
+
+case "${1:-}" in
+  start)
+    echo "[INFO] Starting reverse tunnel: $SUPPORT_HOST:$SUPPORT_PORT -> Pi:22"
+    mkdir -p /run
+    nohup $SSHCMD >/var/log/fieldtool/reverse-tunnel.log 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "[INFO] Started. Tail: tail -f /var/log/fieldtool/reverse-tunnel.log"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then
+      kill "$(cat "$PIDFILE")" || true
+      rm -f "$PIDFILE"
+      echo "[INFO] Stopped."
+    else
+      echo "[INFO] Not running."
+    fi
+    ;;
+  *)
+    echo "Usage: reverse-tunnel {start|stop}"
+    ;;
+esac

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPTS_DIR="/opt/fieldtool/scripts"
+[ -d "$SCRIPTS_DIR" ] || { echo "[ERR] Missing $SCRIPTS_DIR"; exit 2; }
+
+while true; do
+  clear
+  echo "=== FieldTool ==="
+  echo "1) Discover devices on common ranges"
+  echo "2) Discover devices on custom range(s)"
+  echo "3) Serial console (XL1000 preset)"
+  echo "4) Serial console (generic)"
+  echo "5) Add temp IP alias for camera/device"
+  echo "6) Manage temp IP aliases (select to delete)"
+  echo "7) Open device web page"
+  echo "8) Reverse SSH tunnel (start/stop)"
+  echo "9) Watch for device boot (GARP/DHCP)"
+  echo "10) AP status"
+  echo "11) AP clients"
+  echo "12) Camera bridge (AP→eth0 NAT)"
+  echo "13) Client route helper (copy-paste commands)"
+  echo "14) Bench DHCP (start/stop/status/watch)"
+  echo "15) Logs (list/tail/bundle/serve)"
+  echo "16) Backup/export (make/download/serve-start/serve-stop/serve-status)"
+  echo "18) Internet (wlan1): status/scan/home/field/connect-home/connect-field/prefer-home/prefer-field/wifi-on/wifi-off"
+  echo "L) List scripts"
+  echo "Q) Quit"
+  echo
+  read -r -p "Select: " sel
+
+  case "$sel" in
+    1)  "$SCRIPTS_DIR/discover-common"; read -r -p "Enter to continue..." ;;
+    2)  read -r -p "Enter space-separated ranges (e.g. 192.168.88.0/24 10.10.10.0/24): " ranges
+        "$SCRIPTS_DIR/discover-any" $ranges; read -r -p "Enter to continue..." ;;
+    3)  "$SCRIPTS_DIR/serial-xl1000" ;;
+    4)  read -r -p "Device [/dev/ttyUSB0] and baud [115200]: " dev baud
+        "$SCRIPTS_DIR/serial-console" "${dev:-/dev/ttyUSB0}" "${baud:-115200}" ;;
+    5)  "$SCRIPTS_DIR/ip-alias" add; read -r -p "Enter to continue..." ;;
+    6)  "$SCRIPTS_DIR/alias-menu"; read -r -p "Enter to continue..." ;;
+    7)  "$SCRIPTS_DIR/open-web"; read -r -p "Enter to continue..." ;;
+    8)  "$SCRIPTS_DIR/reverse-ssh"; read -r -p "Enter to continue..." ;;
+    9)  "$SCRIPTS_DIR/watch-boot"; read -r -p "Enter to continue..." ;;
+    10) "$SCRIPTS_DIR/ap-status"; read -r -p "Enter to continue..." ;;
+    11) "$SCRIPTS_DIR/ap-clients"; read -r -p "Enter to continue..." ;;
+    12) read -r -p "(start/stop/status): " a
+        "$SCRIPTS_DIR/cam-bridge" "${a}"; read -r -p "Enter to continue..." ;;
+    13) "$SCRIPTS_DIR/client-route-helper"; read -r -p "Enter to continue..." ;;
+    14) read -r -p "(start/stop/status/watch) [NET=192.168.88.0/24 GW=192.168.88.1 IF=eth0]: " a net gw ifc
+        "$SCRIPTS_DIR/temp-dhcp" "${a}" "${net:-192.168.88.0/24}" "${gw:-192.168.88.1}" "${ifc:-eth0}" || true
+        read -r -p "Enter to continue..." ;;
+    15) read -r -p "(list/tail/bundle/serve) [file for tail]: " a f
+        "$SCRIPTS_DIR/logs" "${a}" "${f:-}" || true
+        read -r -p "Enter to continue..." ;;
+    16) read -r -p "(make/download/serve-start/serve-stop/serve-status): " a
+        case "$a" in
+          make)        "$SCRIPTS_DIR/backup" || true; read -r -p "Enter to continue..." ;;
+          download)    "$SCRIPTS_DIR/backup" || true; echo; echo "[INFO] Starting download server (Ctrl+C to stop)"; "$SCRIPTS_DIR/logs" serve ;;
+          serve-start) "$SCRIPTS_DIR/backup" serve-start || true; read -r -p "Enter to continue..." ;;
+          serve-stop)  "$SCRIPTS_DIR/backup" serve-stop  || true; read -r -p "Enter to continue..." ;;
+          serve-status)"$SCRIPTS_DIR/backup" serve-status|| true; read -r -p "Enter to continue..." ;;
+          *) echo "Invalid"; read -r -p "Enter to continue..." ;;
+        esac ;;
+    18) read -r -p "(status/scan/connect-home [pass]/connect-field [pass]/prefer-home/prefer-field/wifi-on/wifi-off): " a p
+        "/opt/fieldtool/scripts/menu-wlan1" "${a}" "${p:-}";;
+    [Ll]) ls -1 "$SCRIPTS_DIR"; read -r -p "Enter to continue..." ;;
+    [Qq]) exit 0 ;;
+    *)  echo "Invalid"; read -r -p "Enter to continue..." ;;
+  esac
+done

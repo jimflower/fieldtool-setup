@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /opt/fieldtool/config.env
+
+exists_up() { ip -br link show "$1" 2>/dev/null | grep -q "UP"; }
+
+if [ -n "${FT_IFACE_ETH:-}" ] && exists_up "$FT_IFACE_ETH"; then
+  echo "$FT_IFACE_ETH"; exit 0
+fi
+
+# First UP non-lo iface
+iface=$(ip -br link | awk '$1!="lo" && $2 ~ /UP/ {print $1; exit}')
+[ -n "$iface" ] && { echo "$iface"; exit 0; }
+
+# Fallback: first non-lo iface
+iface=$(ip -br link | awk '$1!="lo" {print $1; exit}')
+[ -n "$iface" ] && { echo "$iface"; exit 0; }
+
+echo "lo"

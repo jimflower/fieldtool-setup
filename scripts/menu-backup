@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -uo pipefail
+SCRIPTS_DIR="/opt/fieldtool/scripts"
+ACTION="${1:-download}"
+
+# Try sudo first (for system files), fall back to non-sudo; never fail the menu
+out="$({ sudo -n "$SCRIPTS_DIR/backup" "$ACTION" 2>&1 || "$SCRIPTS_DIR/backup" "$ACTION" 2>&1; } || true)"
+printf "%s\n" "$out"
+read -rp "Enter to continue..." _
+exit 0

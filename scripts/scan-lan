@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /opt/fieldtool/config.env
+IFACE="${1:-$FT_IFACE_ETH}"
+LOG="/var/log/fieldtool/scan-lan_$(date +%F_%H-%M-%S).log"
+echo "[INFO] arp-scan on $IFACE" | tee "$LOG"
+sudo arp-scan --interface="$IFACE" --localnet | tee -a "$LOG"
+echo "[INFO] Saved: $LOG"

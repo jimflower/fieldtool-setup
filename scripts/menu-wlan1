@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -uo pipefail
+S="/opt/fieldtool/scripts/wlan1-net"
+act="${1:-status}"; pass="${2:-}"
+if [ -n "$pass" ]; then out="$("$S" "$act" "$pass" 2>&1 || true)"; else out="$("$S" "$act" 2>&1 || true)"; fi
+printf "%s\n" "$out"
+read -rp "Enter to continue..." _
+exit 0

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Usage: port-forward <device_ip> [device_port] [local_port]
+set -euo pipefail
+DEV="${1:-}"; DPORT="${2:-80}"; LPORT="${3:-8080}"
+[ -z "$DEV" ] && { echo "Usage: port-forward <device_ip> [device_port] [local_port]"; exit 2; }
+echo
+echo "Run this on YOUR LAPTOP to open the device web page via the Pi:"
+echo "ssh -L ${LPORT}:${DEV}:${DPORT} pi@$(hostname -I | awk '{print $1}')"
+echo
+echo "Then open: http://localhost:${LPORT}"

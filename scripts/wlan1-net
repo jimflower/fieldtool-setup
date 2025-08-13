@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Defaults; override by exporting HOME_SSID / FIELD_SSID if you want
+HOME_SSID="${HOME_SSID:-ORBI13}"
+FIELD_SSID="${FIELD_SSID:-Espion}"
+IF="wlan1"
+
+run(){ sudo -n "$@" 2>/dev/null || sudo "$@"; }
+
+ensure_basics(){
+  run nmcli dev set "$IF" managed yes || true
+  run nmcli radio wifi on || true
+  # keep your wlan0 AP from hijacking default route
+  run nmcli con mod fieldtool-ap ipv4.never-default yes || true
+}
+
+status(){
+  ensure_basics
+  echo "=== wlan1 link ==="
+  iw dev "$IF" link || true
+  echo
+  echo "=== saved profiles ==="
+  nmcli -t -f NAME,DEVICE,ACTIVE,AUTOCONNECT,AUTOCONNECT-PRIORITY con show | egrep -w "$HOME_SSID|$FIELD_SSID|fieldtool-ap" || true
+  echo
+  echo "=== default route via wlan1 ==="
+  ip -4 route show default | grep "$IF" || echo "(no default on $IF)"
+}
+
+scan(){
+  ensure_basics
+  run nmcli dev wifi rescan ifname "$IF"
+  nmcli -f IN-USE,SSID,BSSID,CHAN,SIGNAL,SECURITY device wifi list ifname "$IF"
+}
+
+connect_named(){
+  local ssid="$1"; local pass="${2-}"
+  ensure_basics
+  if nmcli -t -f NAME,TYPE con show | awk -F: '$2=="wifi"{print $1}' | grep -Fxq "$ssid"; then
+    run nmcli con up "$ssid"
+  else
+    [ -n "$pass" ] || { echo "[ERR] no saved profile and no password provided for $ssid"; exit 2; }
+    run nmcli dev wifi connect "$ssid" ifname "$IF" name "$ssid" password "$pass"
+  fi
+  echo "[OK] connected to $ssid on $IF"
+}
+
+prefer_home(){
+  ensure_basics
+  run nmcli con mod "$HOME_SSID"  connection.interface-name "$IF" connection.autoconnect yes connection.autoconnect-priority 200 ipv4.route-metric 50 ipv6.route-metric 50
+  run nmcli con mod "$FIELD_SSID" connection.interface-name "$IF" connection.autoconnect yes connection.autoconnect-priority 100 ipv4.route-metric 50 ipv6.route-metric 50
+  echo "[OK] prefer $HOME_SSID at home; $FIELD_SSID as fallback"
+}
+
+prefer_field(){
+  ensure_basics
+  run nmcli con mod "$HOME_SSID"  connection.interface-name "$IF" connection.autoconnect yes connection.autoconnect-priority 100 ipv4.route-metric 50 ipv6.route-metric 50
+  run nmcli con mod "$FIELD_SSID" connection.interface-name "$IF" connection.autoconnect yes connection.autoconnect-priority 200 ipv4.route-metric 50 ipv6.route-metric 50
+  echo "[OK] prefer $FIELD_SSID (field); $HOME_SSID as fallback"
+}
+
+home(){
+  prefer_home
+  # optional password for first-time connect
+  connect_named "$HOME_SSID" "${1-}"
+}
+
+field(){
+  prefer_field
+  connect_named "$FIELD_SSID" "${1-}"
+}
+
+case "${1:-status}" in
+  status)        status ;;
+  scan)          scan ;;
+  connect-home)  connect_named "$HOME_SSID"  "${2-}" ;;
+  connect-field) connect_named "$FIELD_SSID" "${2-}" ;;
+  prefer-home)   prefer_home ;;
+  prefer-field)  prefer_field ;;
+  home)          shift || true; home "${1-}";;
+  field)         shift || true; field "${1-}";;
+  wifi-on)       run nmcli radio wifi on;  echo "[OK] Wi-Fi on" ;;
+  wifi-off)      run nmcli radio wifi off; echo "[OK] Wi-Fi off" ;;
+  *) echo "Usage: wlan1-net {status|scan|home [pass]|field [pass]|connect-home [pass]|connect-field [pass]|prefer-home|prefer-field|wifi-on|wifi-off}"; exit 2 ;;
+esac
+EOF
+sudo chmod +x /opt/fieldtool/scripts/wlan1-net

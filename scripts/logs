@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+CMD="${1:-list}"; ARG="${2:-}"
+RUN=/run/fieldtool; LOGDIR=/var/log/fieldtool
+mkdir -p "$RUN" "$LOGDIR"
+
+list() {
+  echo "=== FieldTool logs ==="
+  ls -lh "$LOGDIR" 2>/dev/null || true
+  echo; echo "=== Temp logs (/run/fieldtool) ==="
+  ls -lh "$RUN"/dnsmasq-temp.* "$RUN"/discover_* "$RUN"/*.state 2>/dev/null || true
+}
+tailf() {
+  local f="$ARG"
+  [[ -z "$f" ]] && { echo "Usage: logs tail <path>"; exit 2; }
+  sudo tail -F "$f"
+}
+bundle() {
+  local tar="/tmp/fieldtool-logs_$(date +%F_%H%M).tgz"
+  sudo tar czf "$tar" "$LOGDIR" "$RUN" 2>/dev/null || true
+  echo "$tar"
+}
+serve() {
+  local tar="$(bundle)"
+  echo "[OK] Bundle: $tar"
+  echo "[INFO] Serving /tmp on http://10.99.0.1:8008/  (Ctrl-C to stop)"
+  (cd /tmp && python3 -m http.server 8008)
+}
+case "$CMD" in
+  list) list;;
+  tail) tailf;;
+  bundle) bundle;;
+  serve) serve;;
+  *) echo "Usage: logs {list|tail <file>|bundle|serve}"; exit 2;;
+esac

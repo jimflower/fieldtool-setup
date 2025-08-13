@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+CMD="${1:-}"; IN_IF="${2:-wlan0}"; OUT_IF="${3:-eth0}"; NET="${4:-}"
+STATE_DIR="/run/fieldtool"; mkdir -p "$STATE_DIR"; STATE="$STATE_DIR/cam-bridge.state"
+
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+find_net(){ # prefer alias file, else any v4 on OUT_IF; normalize /24 -> X.Y.Z.0/24
+  local out="$1" alias_file="$STATE_DIR/alias_${out}.txt" cidr
+  if [[ -s "$alias_file" ]]; then cidr="$(cat "$alias_file")"
+  else cidr="$(ip -o -4 addr show dev "$out" | awk '/inet /{print $4; exit}')"; fi
+  [[ -z "${cidr:-}" ]] && return 1
+  [[ "$cidr" =~ /24$ ]] && echo "${cidr%.*}.0/24" || echo "$cidr"
+}
+
+snat_ip_for_net(){ # pick the address on OUT_IF that belongs to NET (/24 assumed)
+  local out="$1" net="$2" prefix; prefix="$(echo "$net" | cut -d/ -f1 | cut -d. -f1-3)."
+  ip -o -4 addr show dev "$out" | awk -v p="$prefix" '$4 ~ "^"p {split($4,a,"/"); print a[1]; exit}'
+}
+
+start_nft(){
+  local in="$1" out="$2" net="$3"
+  sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  # ip family: filter + nat
+  sudo nft add table ip cambridge   2>/dev/null || true
+  sudo nft add table ip camnat      2>/dev/null || true
+  sudo nft add chain ip cambridge forward '{ type filter hook forward priority 0; policy accept; }' 2>/dev/null || true
+  sudo nft add chain ip camnat post '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+  sudo nft flush chain ip cambridge forward
+  sudo nft flush chain ip camnat post
+
+  sudo nft add rule ip cambridge forward iifname "$in"  oifname "$out" ip daddr "$net" accept
+  sudo nft add rule ip cambridge forward iifname "$out" oifname "$in"  ct state established,related accept
+  sudo nft add rule ip cambridge forward iifname "$in"  oifname "$out" ip protocol icmp ip daddr "$net" accept
+
+  local snat_ip; snat_ip="$(snat_ip_for_net "$out" "$net" || true)"
+  if [[ -n "${snat_ip:-}" ]]; then
+    sudo nft add rule ip camnat post oifname "$out" ip daddr "$net" snat to "$snat_ip"
+  else
+    sudo nft add rule ip camnat post oifname "$out" ip daddr "$net" masquerade
+  fi
+
+  # inet family forward (higher priority to bypass any default drops)
+  sudo nft add table inet cambridge 2>/dev/null || true
+  sudo nft add chain inet cambridge forward '{ type filter hook forward priority -10; policy accept; }' 2>/dev/null || true
+  sudo nft flush chain inet cambridge forward
+  sudo nft add rule inet cambridge forward iifname "$in"  oifname "$out" ip daddr "$net" accept
+  sudo nft add rule inet cambridge forward iifname "$out" oifname "$in"  ct state established,related accept
+  sudo nft add rule inet cambridge forward iifname "$in"  oifname "$out" ip protocol icmp ip daddr "$net" accept
+}
+
+stop_nft(){ sudo nft delete table ip cambridge 2>/dev/null || true; sudo nft delete table ip camnat 2>/dev/null || true; sudo nft delete table inet cambridge 2>/dev/null || true; }
+
+case "$CMD" in
+  start)
+    [[ -z "$NET" ]] && NET="$(find_net "$OUT_IF")" || true
+    [[ -z "$NET" ]] && { echo "[ERR] Could not determine camera subnet on $OUT_IF. Add an alias first."; exit 2; }
+    echo "[INFO] Bridging $IN_IF -> $OUT_IF to $NET"
+    start_nft "$IN_IF" "$OUT_IF" "$NET"
+    printf "MODE=nft\nIN_IF=%s\nOUT_IF=%s\nNET=%s\n" "$IN_IF" "$OUT_IF" "$NET" > "$STATE"
+    echo "[OK] Bridge active."
+    ;;
+  stop)  echo "[INFO] Removing bridge for ${NET:-<any>}"; stop_nft; rm -f "$STATE"; echo "[OK] Bridge stopped." ;;
+  status)
+    echo "=== cam-bridge status ==="
+    [[ -f "$STATE" ]] && . "$STATE" && echo "MODE=nft  IN_IF=$IN_IF  OUT_IF=$OUT_IF  NET=$NET" || echo "Bridge: inactive"
+    sudo sysctl net.ipv4.ip_forward
+    sudo nft list chain ip cambridge forward 2>/dev/null | sed -n 's/^/  /p'
+    sudo nft list chain ip camnat post       2>/dev/null | sed -n 's/^/  /p'
+    sudo nft list chain inet cambridge forward 2>/dev/null | sed -n 's/^/  /p'
+    ;;
+  *) echo "Usage: cam-bridge {start|stop|status} [IN_IF] [OUT_IF] [NET]"; exit 2 ;;
+esac

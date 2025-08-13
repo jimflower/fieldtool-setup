@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Usage: backup [make]
+set -u
+STAMP=$(date +%F_%H%M)
+OUT="/tmp/fieldtool_backup_${STAMP}.tgz"
+
+paths=(
+  /opt/fieldtool
+  /opt/fieldtool/config.env
+  /etc/NetworkManager/system-connections/fieldtool-ap.nmconnection
+  /etc/NetworkManager/conf.d/10-unmanaged-eth0.conf
+  /etc/systemd/system/eth0-up.service
+  /etc/systemd/system/fieldtool-ap.service
+  /etc/tmpfiles.d/fieldtool.conf
+  /etc/udev/rules.d/99-ttyxl1000.rules
+)
+have=(); for p in "${paths[@]}"; do [ -e "$p" ] && have+=("$p"); done
+
+if [ ${#have[@]} -eq 0 ]; then
+  echo "[ERR] nothing to back up"; exit 2
+fi
+
+echo "[INFO] creating: $OUT"
+if sudo tar czf "$OUT" "${have[@]}"; then
+  echo "[OK] bundle ready: $OUT"
+  exit 0
+else
+  echo "[ERR] tar failed"; exit 2
+fi

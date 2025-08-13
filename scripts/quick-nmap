@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+TARGET="${1:-192.168.0.0/24}"
+LOG="/var/log/fieldtool/quick-nmap_$(date +%F_%H-%M-%S).log"
+echo "[INFO] nmap -sn ${TARGET}" | tee "$LOG"
+nmap -sn "$TARGET" | tee -a "$LOG"
+echo "[INFO] Saved log to $LOG"

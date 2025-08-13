@@ -1,0 +1,95 @@
+# 13) Client route helper
+sudo tee /opt/fieldtool/scripts/client-route-helper >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="/run/fieldtool/alias_eth0.txt"
+if [[ -s "$STATE" ]]; then CIDR=$(cat "$STATE"); else CIDR=$(ip -o -4 addr show dev eth0 | awk '/inet /{print $4; exit}'); fi
+[[ -z "${CIDR:-}" ]] && { echo "[ERR] No eth0 IPv4/alias; add one first."; exit 2; }
+NETBITS="${CIDR#*/}"; BASE="${CIDR%/*}"; NET="${BASE%.*}.0/${NETBITS}"
+AP_IP=$(ip -4 -o addr show dev wlan0 | awk '{print $4}' | cut -d/ -f1)
+case "$NETBITS" in 24) MASK=255.255.255.0;;16) MASK=255.255.0.0;;8) MASK=255.0.0.0;;*) MASK="<netmask-for-/$NETBITS>";; esac
+NET_ADDR="${NET%/*}"
+cat <<OUT
+=== Client route helper ===
+Camera subnet: $NET
+Pi AP gateway: $AP_IP
+
+Windows (Admin):
+  route -p add $NET_ADDR mask $MASK $AP_IP metric 1
+  # remove: route -p delete $NET_ADDR
+
+macOS:
+  sudo route -n add -net $NET $AP_IP
+  # remove: sudo route -n delete -net $NET
+
+Linux:
+  sudo ip route add $NET via $AP_IP
+  # remove: sudo ip route del $NET via $AP_IP
+OUT
+EOF
+sudo chmod +x /opt/fieldtool/scripts/client-route-helper
+
+# 14) Bench DHCP (start/stop/status/watch) — current, working version
+sudo tee /opt/fieldtool/scripts/temp-dhcp >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+CMD="${1:-}"; NET="${2:-192.168.88.0/24}"; GW="${3:-192.168.88.1}"; IF="${4:-eth0}"
+RUN=/run/fieldtool; sudo install -d -m 0755 -o pi -g pi "$RUN" >/dev/null
+CONF="$RUN/dnsmasq-temp.conf"; LEASES="$RUN/dnsmasq-temp.leases"; PID="$RUN/dnsmasq-temp.pid"; LOG="$RUN/dnsmasq-temp.log"; STATE="$RUN/dnsmasq-temp.state"
+bits2mask(){ local bits="${1:-24}"; local m=$(( 0xFFFFFFFF << (32-bits) & 0xFFFFFFFF )); printf "%d.%d.%d.%d" $(((m>>24)&255)) $(((m>>16)&255)) $(((m>>8)&255)) $((m&255)); }
+case "${CMD}" in
+  start)
+    sudo ip link set "$IF" up
+    sudo ip addr replace "$GW/${NET#*/}" dev "$IF"
+    MASK="$(bits2mask "${NET#*/}")"
+    sudo bash -c "cat >'$CONF' <<CFG
+interface=$IF
+bind-interfaces
+port=0
+no-resolv
+dhcp-range=${GW%.*}.50,${GW%.*}.150,$MASK,1h
+dhcp-option=3,$GW
+dhcp-option=6,1.1.1.1
+dhcp-authoritative
+dhcp-leasefile=$LEASES
+pid-file=$PID
+log-dhcp
+log-facility=$LOG
+CFG"
+    sudo pkill -f "dnsmasq -C $CONF" >/dev/null 2>&1 || true
+    sudo dnsmasq -C "$CONF"
+    printf "IF=%s\nGW=%s\nNET=%s\nCONF=%s\nLEASES=%s\nLOG=%s\n" "$IF" "$GW" "$NET" "$CONF" "$LEASES" "$LOG" | sudo tee "$STATE" >/dev/null
+    echo "[OK] DHCP started on $IF @ $GW ($NET). Leases: $LEASES"
+    ;;
+  stop)
+    [ -f "$PID" ] && sudo kill "$(cat "$PID")" 2>/dev/null || true
+    sudo pkill -f "dnsmasq -C $CONF" >/dev/null 2>&1 || true
+    echo "[OK] DHCP stopped. Leases kept at $LEASES"
+    ;;
+  status)
+    [ -f "$STATE" ] && . "$STATE" || true
+    if pgrep -f "dnsmasq -C $CONF" >/dev/null; then
+      echo "=== temp-dhcp ==="
+      echo "  iface: ${IF:-?}"
+      echo "  gw:    ${GW:-?}"
+      echo "  net:   ${NET:-?}"
+    else
+      echo "[INFO] temp-dhcp not running."
+    fi
+    if [ -f "${LEASES:-$LEASES}" ]; then
+      echo "=== Leases (${LEASES:-$LEASES}) ==="
+      sudo awk '{printf "%s  %-17s  %-15s  %s\n", strftime("%Y-%m-%d %H:%M:%S",$1), $2, $3, $4}' "${LEASES:-$LEASES}" || true
+    else
+      echo "No lease file yet."
+    fi
+    ;;
+  watch)
+    [ -f "$STATE" ] && . "$STATE" || true
+    echo "[INFO] Watching ${LEASES:-$LEASES} (Ctrl+C to exit) ..."
+    sudo touch "${LEASES:-$LEASES}"
+    sudo tail -F "${LEASES:-$LEASES}"
+    ;;
+  *) echo "Usage: temp-dhcp {start|stop|status|watch} [NET=192.168.88.0/24] [GW=192.168.88.1] [IF=eth0]"; exit 2 ;;
+esac
+EOF
+sudo chmod +x /opt/fieldtool/scripts/temp-dhcp

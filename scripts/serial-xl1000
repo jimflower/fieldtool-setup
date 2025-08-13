@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+. /opt/fieldtool/config.env
+DEV="${1:-$XL1000_DEV}"
+BAUD="${2:-$XL1000_BAUD}"
+sudo sed -i "s|^pu port .*|pu port             $DEV|" /etc/minicom/minirc.xl1000
+sudo sed -i "s|^pu baudrate .*|pu baudrate         $BAUD|" /etc/minicom/minirc.xl1000
+echo "[INFO] XL1000 console on ${DEV} @ ${BAUD} (Ctrl-A X to exit)"
+minicom xl1000 -o

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# watch-boot [seconds] — ARP-only, auto-alias, quick probe, print ssh -L
+set -euo pipefail
+. /opt/fieldtool/config.env
+SCRIPTS="/opt/fieldtool/scripts"
+IFACE="$("$SCRIPTS/iface-detect")"
+DUR="${1:-120}"
+
+LOG="/var/log/fieldtool/watch-boot_$(date +%F_%H-%M-%S).log"
+echo "[INFO] Interface: $IFACE"
+echo "[INFO] Power-cycle the device now. Listening ${DUR}s for ARP probes/gratuitous ARP..."
+
+DEVICE_IP=""
+# Use process substitution so the while-loop runs in the current shell
+while IFS= read -r L; do
+  if [[ $L =~ who-has[[:space:]]([0-9\.]+)[[:space:]]tell[[:space:]]([0-9\.]+) ]]; then
+    ip="${BASH_REMATCH[1]}"; tell="${BASH_REMATCH[2]}"
+    echo "[DBG] ARP who-has ${ip} tell ${tell}"
+    if [[ "$ip" == "$tell" || "$tell" == "0.0.0.0" ]]; then
+      DEVICE_IP="$ip"
+      echo "[DETECT] Device IP: $DEVICE_IP"
+      break
+    fi
+  fi
+done < <(sudo timeout "$DUR" tcpdump -ni "$IFACE" -l -vvv arp 2>/dev/null | tee "$LOG")
+
+if [ -z "${DEVICE_IP:-}" ]; then
+  echo "[WARN] No ARP probe/self-ARP detected. Saved capture: $LOG"
+  exit 1
+fi
+
+SUBNET24="${DEVICE_IP%.*}.0/24"
+added=$("$SCRIPTS/ip-alias" add "auto:$SUBNET24" "$IFACE" | awk -F= '/ADDED_ALIAS/{print $2}')
+echo "[INFO] Added temporary alias: ${added:-$SUBNET24} on $IFACE"
+if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then 
+  /opt/fieldtool/scripts/cam-bridge start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true; 
+  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)"; 
+fi
+# Auto-start bridge from AP->eth to the detected /24 if enabled
+
+if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then
+
+  ""/opt/fieldtool/scripts/cam-bridge"" start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true
+
+  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)";
+
+fi
+# Auto-start bridge from AP->eth to the detected /24 if enabled
+
+if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then
+
+  ""/opt/fieldtool/scripts/cam-bridge"" start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true
+
+  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)";
+
+fi
+
+if command -v nmap >/dev/null 2>&1; then
+  echo "[INFO] Probing $DEVICE_IP ..."
+  sudo nmap -Pn -n -e "$IFACE" -p 80,443,22,554,8000-8100 --open "$DEVICE_IP" || true
+fi
+
+DEV_PREFIX="${DEVICE_IP%.*}."
+MGMT_IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | grep -v "^${DEV_PREFIX}" | head -n1)"
+[ -z "$MGMT_IP" ] && MGMT_IP="<your-pi-address>"
+
+echo
+echo "[NEXT] On YOUR LAPTOP:"
+echo "  ssh -L 8080:${DEVICE_IP}:80 pi@${MGMT_IP}"
+echo "  # then open: http://localhost:8080"
+echo
+echo "[INFO] Log saved: $LOG"

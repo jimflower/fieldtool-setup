@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-status}"
+NET="${2:-192.168.88.0/24}"
+GW="${3:-}"    # optional; default = network .1
+IF="${4:-eth0}"
+
+CONF="/run/fieldtool/dnsmasq-temp.conf"
+PID="/run/fieldtool/dnsmasq-temp.pid"
+LEASES="/run/fieldtool/dnsmasq-temp.leases"
+
+parse_net(){  # extracts BASE x.y.z for /24 nets
+  BASE=$(echo "$NET" | awk -F'[./]' '{printf "%s.%s.%s",$1,$2,$3}')
+  : "${GW:=$BASE.1}"
+  START="$BASE.50"; END="$BASE.150"
+}
+
+start(){
+  parse_net
+  sudo pkill -f "$CONF" 2>/dev/null || true
+  sudo mkdir -p /run/fieldtool
+  sudo rm -f "$CONF" "$PID" 2>/dev/null || true
+
+  sudo ip link set "$IF" up
+  sudo ip addr replace "$GW/24" dev "$IF" label "$IF:bench"
+
+  sudo tee "$CONF" >/dev/null <<CFG
+interface=$IF
+bind-interfaces
+no-resolv
+port=0
+dhcp-range=$START,$END,1h
+dhcp-option=3,$GW
+dhcp-option=6,1.1.1.1
+dhcp-leasefile=$LEASES
+pid-file=$PID
+log-dhcp
+CFG
+
+  sudo dnsmasq --test -C "$CONF"
+  sudo dnsmasq -C "$CONF"
+  echo "[OK] DHCP started on $IF @ $GW ($NET). Leases: $LEASES"
+}
+
+stop(){
+  [ -f "$PID" ] && sudo kill "$(cat "$PID")" 2>/dev/null || true
+  sudo pkill -f "$CONF" 2>/dev/null || true
+  echo "[OK] DHCP stopped. Leases kept at $LEASES"
+}
+
+status(){
+  pgrep -af "dnsmasq -C $CONF" >/dev/null && echo "[OK] running" || echo "[INFO] not running"
+  sudo ss -lunp | grep ':67' || true
+  [ -f "$CONF" ] && { echo "=== $CONF ==="; sed -n '1,20p' "$CONF"; }
+  echo "=== Leases ($LEASES) ==="; [ -f "$LEASES" ] && cat "$LEASES" || echo "(none)"
+}
+
+watch(){ echo "[INFO] Watching DHCP on $IF... Ctrl-C to stop"; sudo tcpdump -ni "$IF" -vvv -s0 'port 67 or port 68'; }
+
+case "${action}" in
+  start) start ;; stop) stop ;; status) status ;; watch) watch ;;
+  *) echo "Usage: temp-dhcp {start|stop|status|watch} [NET=/24] [GW] [IF]"; exit 2 ;;
+esac

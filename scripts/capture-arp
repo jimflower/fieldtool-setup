@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFACE="${1:-eth0}"
+LOG="/var/log/fieldtool/arp-capture_$(date +%F_%H-%M-%S).log"
+echo "[INFO] Capturing ARP on ${IFACE} for 10 seconds..." | tee "$LOG"
+sudo timeout 10 tcpdump -ni "$IFACE" arp | tee -a "$LOG"
+echo "[INFO] Saved log to $LOG"

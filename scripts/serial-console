@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Usage: serial-console /dev/ttyUSB0 9600
+set -euo pipefail
+DEV="${1:-/dev/ttyUSB0}"
+BAUD="${2:-9600}"
+echo "[INFO] Opening ${DEV} @ ${BAUD} (Ctrl-A X to exit)"
+minicom -b "$BAUD" -o -D "$DEV"

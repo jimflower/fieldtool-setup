@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== Associated stations on wlan0 ==="
+iw dev wlan0 station dump | awk '
+  /Station/ {if(mac){printf "%-17s  %4s dBm  rx:%-7s tx:%-7s\n", mac, sig, rx, tx} mac=$2; sig=""; rx=""; tx=""; next}
+  /signal:/ {sig=$2}
+  /rx bitrate:/ {rx=$3$4}
+  /tx bitrate:/ {tx=$3$4}
+  END{if(mac){printf "%-17s  %4s dBm  rx:%-7s tx:%-7s\n", mac, sig, rx, tx}}'
+echo
+LEASE=$(pgrep -af "dnsmasq.*wlan0" | sed -n 's/.*--dhcp-leasefile=\([^ ]*\).*/\1/p')
+[ -n "$LEASE" ] && { echo "=== DHCP leases ($LEASE) ==="; sudo cat "$LEASE" 2>/dev/null || true; } || echo "No dnsmasq lease file found."
+echo
+echo "=== ARP on AP subnet ==="
+arp -an | sed -n 's/^/  /p'
