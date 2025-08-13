@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
+shopt -s nullglob
 set -euo pipefail
+# ----- config defaults -----
 : "${WIFI_COUNTRY:=AU}"
 : "${AP_SSID_BASE:=FieldTool}"
 : "${AP_PASS:=FieldTool_12345}"
-: "${ORBI_SSID:=ORBI13}";   : "${ORBI_PASS:=REPLACE_ME}"
-: "${ESPION_SSID:=Espion}"; : "${ESPION_PASS:=REPLACE_ME}"
+: "${ORBI_SSID:=ORBI13}"
+: "${ESPION_SSID:=Espion}"
+
+# Optional secrets file (NOT committed): ./SECRETS.env
+# Example contents:
+# ORBI_PASS='your-home-pass'
+# ESPION_PASS='your-espion-pass'
+set -a
+[ -f "./SECRETS.env" ] && . "./SECRETS.env"
+set +a
+
+# Prompt for secrets if still unset/placeholder
+if [ -z "${ORBI_PASS:-}" ] || [ "${ORBI_PASS}" = "REPLACE_ME" ]; then
+  read -rsp "ORBI Wi-Fi password: " ORBI_PASS; echo
+fi
+if [ -z "${ESPION_PASS:-}" ] || [ "${ESPION_PASS}" = "REPLACE_ME" ]; then
+  read -rsp "Espion (Beryl) Wi-Fi password: " ESPION_PASS; echo
+fi
 
 sudo apt-get update
 sudo apt-get install -y network-manager git nmap arp-scan tcpdump dnsmasq nftables autossh minicom screen picocom
@@ -22,7 +40,7 @@ sudo rsync -a --chmod=Du=rwx,Fu=rwX ./scripts/ /opt/fieldtool/scripts/
 
 # Systemd (optional)
 if [ -d ./systemd ]; then
-  for f in ./systemd/*; do sudo install -m0644 "$f" "/etc/systemd/system/$(basename "$f")"; done
+  for f in ./systemd/*; do [ -e "$f" ] || continue; sudo install -m0644 "$f" "/etc/systemd/system/$(basename "$f")"; done
   sudo systemctl daemon-reload
   sudo systemctl enable --now fieldtool-ap-heal.timer 2>/dev/null || true
 fi
