@@ -62,6 +62,11 @@ sudo nmcli con mod "$ESPION_SSID" connection.interface-name wlan1 connection.aut
 
 echo "[OK] Install complete."
 echo "AP SSID: $SSID (pass: $AP_PASS) IP: 10.99.0.1"
+# (after the part where you create & up fieldtool-ap and enable ap-dhcp)
+# e.g. right after: echo "[OK] AP ready on $AP_IF …"
+try_uplink "${ORBI_SSID:-}"   "${ORBI_PASS:-}"   "${WLAN1_IF:-wlan1}" || true
+try_uplink "${ESPION_SSID:-}" "${ESPION_PASS:-}" "${WLAN1_IF:-wlan1}" || true
+
 # --- BEGIN FieldTool bootstrap additions ---
 
 # Create /opt/fieldtool/config.env with sensible defaults if missing
@@ -125,3 +130,23 @@ sudo systemctl enable --now ap-dhcp
 
 echo "[OK] AP ready on $AP_IF → SSID: $SSID (pass: ${AP_PASS:-FieldTool_12345}) IP: 10.99.0.1"
 # --- END FieldTool bootstrap additions ---
+
+# ---- FieldTool: best-effort uplink config (does not abort) ----
+try_uplink() {
+  local ssid="$1" pass="$2" ifname="${3:-wlan1}"
+  [[ -z "$ssid" ]] && return 0
+  echo "[INFO] Configuring uplink SSID '$ssid' on $ifname (best-effort)"
+  sudo nmcli radio wifi on || true
+  sudo nmcli dev wifi rescan ifname "$ifname" || true
+  if sudo nmcli -f SSID dev wifi list ifname "$ifname" | awk 'NR>1' | grep -Fxq "$ssid"; then
+    sudo nmcli con delete "$ssid" 2>/dev/null || true
+    sudo nmcli con add type wifi ifname "$ifname" con-name "$ssid" ssid "$ssid" || true
+    if [[ -n "$pass" ]]; then
+      sudo nmcli con mod "$ssid" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pass" || true
+    fi
+    sudo nmcli con mod "$ssid" connection.autoconnect yes connection.autoconnect-priority 100 ipv4.route-metric 50 ipv6.route-metric 50 || true
+    echo "[OK] Uplink profile '$ssid' configured."
+  else
+    echo "[WARN] SSID '$ssid' not seen on $ifname now; skipping (you can connect later)."
+  fi
+}

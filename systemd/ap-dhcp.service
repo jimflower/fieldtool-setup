@@ -1,7 +1,7 @@
 [Unit]
 Description=FieldTool AP DHCP (wlan0)
-After=network-online.target
-Wants=network-online.target
+After=NetworkManager.service
+Requires=NetworkManager.service
 Conflicts=dnsmasq.service
 
 [Service]
