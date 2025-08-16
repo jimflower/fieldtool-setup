@@ -1,0 +1,13 @@
+[Unit]
+Description=Ensure FieldTool AP owns wlan0
+After=NetworkManager.service
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nmcli dev disconnect wlan0
+ExecStart=/usr/bin/nmcli con up fieldtool-ap
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
