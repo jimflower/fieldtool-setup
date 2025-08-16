@@ -1,67 +1,60 @@
 #!/usr/bin/env bash
+set -Eeuo pipefail
+REQ_IF="${1:-}"
+
+# optional config
 [ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
-# alias-menu [iface]
-# Lists FieldTool temp aliases and lets you select which to delete.
-set -euo pipefail
-SCRIPTS="/opt/fieldtool/scripts"
-IFACE="${1:-$("$SCRIPTS/iface-detect")}"
-STATE="/run/fieldtool/alias_${IFACE}.txt"
 
-# Collect candidates: addresses with label IFACE:cam + remembered alias (if present)
-CIDRS=()
-LABELS=()
+# Build candidate interface list (prefer explicit -> config -> common wired names)
+declare -a CAND=()
+[[ -n "$REQ_IF" ]]          && CAND+=("$REQ_IF")
+[[ -n "${BRIDGE_OUT_IF:-}" ]] && CAND+=("$BRIDGE_OUT_IF")
+[[ -n "${LAN_IF:-}" ]]        && CAND+=("$LAN_IF")
+CAND+=("eth0" "usb0")
 
-while IFS= read -r line; do
-  cidr="$(awk '{print $4}' <<<"$line")"
-  label="$(sed -n 's/.* label \([^ ]*\).*/\1/p' <<<"$line")"
-  CIDRS+=("$cidr"); LABELS+=("${label:-}")
-done < <(ip -o -4 addr show dev "$IFACE" | grep -E "label ${IFACE}:cam" || true)
+# Add any other non-wlan, non-lo links present
+mapfile -t OTHERS < <(ip -o link | awk -F': ' '{print $2}' | grep -Ev '^(lo|wlan|p2p)' )
+# De-dup while preserving order
+declare -A seen; IFACES=()
+for x in "${CAND[@]}" "${OTHERS[@]}"; do
+  [[ -n "$x" && -z "${seen[$x]:-}" ]] && { IFACES+=("$x"); seen[$x]=1; }
+done
+[[ ${#IFACES[@]} -eq 0 ]] && IFACES=("eth0")
 
-if [[ -s "$STATE" ]]; then
-  remembered="$(cat "$STATE")"
-  if ip -o -4 addr show dev "$IFACE" | awk '{print $4}' | grep -qx "$remembered"; then
-    # add if not already listed
-    if ! printf '%s\n' "${CIDRS[@]}" | grep -qx "$remembered"; then
-      CIDRS+=("$remembered"); LABELS+=("(remembered)")
-    fi
-  fi
-fi
+# Collect labelled IPv4 aliases across IFACES
+ENTRIES=()  # store as IF|CIDR|LABEL
+for ifc in "${IFACES[@]}"; do
+  while read -r cidr label; do
+    [[ -z "${cidr:-}" ]] && continue
+    ENTRIES+=("${ifc}|${cidr}|${label}")
+  done < <(
+    ip -o -4 addr show dev "$ifc" 2>/dev/null | sed 's/\\$//' | \
+    awk -v ifc="$ifc" '$0 ~ /scope global/ {
+      cidr=$4; label="";
+      for (i=1;i<=NF;i++) if ($i ~ "^"ifc":") {label=$i; break}
+      if (label!="") print cidr, label
+    }'
+  )
+done
 
-if [[ ${#CIDRS[@]} -eq 0 ]]; then
-  echo "[INFO] No FieldTool temp aliases found on $IFACE."
-  echo "Tip: view all addresses with: ip -o -4 addr show dev $IFACE"
+if (( ${#ENTRIES[@]} == 0 )); then
+  echo "[INFO] No labelled aliases found on: ${IFACES[*]}"
+  echo "Tip: add with: fieldtool run ip-alias add auto:192.168.8.0/24 ${IFACES[0]}"
   exit 0
 fi
 
-echo "Temp aliases on $IFACE:"
-for i in "${!CIDRS[@]}"; do
-  printf "  %d) %-18s %s\n" $((i+1)) "${CIDRS[$i]}" "${LABELS[$i]}"
-done
-echo
-read -rp "Delete which? (numbers, space-separated; 'a'=all; 'q'=cancel): " choice
-
-if [[ -z "$choice" || "$choice" =~ ^[Qq]$ ]]; then
-  echo "Cancelled."; exit 0
-fi
-
-if [[ "$choice" =~ ^[Aa]$ ]]; then
-  idxs="$(seq 1 ${#CIDRS[@]})"
-else
-  idxs="$choice"
-fi
-
-for n in $idxs; do
-  if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#CIDRS[@]} )); then
-    cidr="${CIDRS[$((n-1))]}"
-    echo "[INFO] Removing $cidr from $IFACE"
-    sudo ip addr del "$cidr" dev "$IFACE" || true
-    # Clear remembered state if it matches
-    [[ -s "$STATE" && "$(cat "$STATE")" == "$cidr" ]] && : > "$STATE"
-  else
-    echo "[WARN] Skipping invalid selection: $n"
-  fi
+echo "=== Temp aliases (labelled) ==="
+for i in "${!ENTRIES[@]}"; do
+  IFS='|' read -r ifc cidr label <<<"${ENTRIES[$i]}"
+  printf "%d) %-8s %-18s %s\n" $((i+1)) "$ifc" "$cidr" "$label"
 done
 
-echo
-echo "[INFO] Current addresses on $IFACE:"
-ip -o -4 addr show dev "$IFACE" | sed -n 's/^/  /p'
+read -rp "Select number to delete (or Enter to exit): " sel
+[[ -z "${sel:-}" ]] && exit 0
+idx=$((sel-1))
+(( idx>=0 && idx<${#ENTRIES[@]} )) || { echo "[ERR] invalid selection"; exit 2; }
+
+IFS='|' read -r ifc cidr label <<<"${ENTRIES[$idx]}"
+# delete using the exact label; fall back without label if needed
+sudo ip addr del "$cidr" dev "$ifc" label "$label" 2>/dev/null || sudo ip addr del "$cidr" dev "$ifc"
+echo "[OK] Removed $cidr ($label) on $ifc"
