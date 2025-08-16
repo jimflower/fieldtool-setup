@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 # alias-menu [iface]
 # Lists FieldTool temp aliases and lets you select which to delete.
 set -euo pipefail

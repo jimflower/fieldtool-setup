@@ -1,0 +1,13 @@
+[Unit]
+Description=FieldTool AP DHCP (wlan0)
+After=network-online.target
+Wants=network-online.target
+Conflicts=dnsmasq.service
+
+[Service]
+ExecStart=/usr/sbin/dnsmasq -C /etc/fieldtool/ap-dhcp.conf
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
