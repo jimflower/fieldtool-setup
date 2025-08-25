@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
+
+usage(){ echo "Usage:
+  subnet-calc <IP>/<prefix>
+  subnet-calc <IP> <netmask>
+  subnet-calc <IP> <GatewayIP>
+  subnet-calc --pair <IP> <GatewayIP>"; exit 1; }
+
+ip2int(){ IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+int2ip(){ local x=$1; printf "%d.%d.%d.%d" $(((x>>24)&255)) $(((x>>16)&255)) $(((x>>8)&255)) $((x&255)); }
+mask2cidr(){ IFS=. read -r a b c d <<<"$1"; n=$((a*16777216+b*65536+c*256+d)); c=0; for i in {31..0}; do (( (n>>i)&1 )) && ((c++)); done; echo "$c"; }
+cidr2mask(){ local p=$1; local m=$(( (0xFFFFFFFF << (32-p)) & 0xFFFFFFFF )); int2ip "$m"; }
+net_of(){ local ip="$1" p="$2"; local i=$(ip2int "$ip"); local m=$(( (0xFFFFFFFF << (32-p)) & 0xFFFFFFFF )); int2ip $(( i & m )); }
+bcast_of(){ local ip="$1" p="$2"; local i=$(ip2int "$ip"); local m=$(( (0xFFFFFFFF << (32-p)) & 0xFFFFFFFF )); int2ip $(( (i & m) | (~m & 0xFFFFFFFF) )); }
+prefix_from_pair(){ local a=$(ip2int "$1") b=$(ip2int "$2") xor=$(( a ^ b )) p=32; while ((xor)); do xor=$((xor>>1)); p=$((p-1)); done; ((p<16))&&p=16; ((p>32))&&p=32; echo "$p"; }
+pick_alias(){ local net="$1" p="$2" dev="$3" gw="${4:-}"; local base=$(ip2int "$net") size=$((1<<(32-p))); local cand=$((base+2)); local di=$(ip2int "$dev"); local gi=$([[ -n "$gw" ]]&&ip2int "$gw"||echo -1); [[ $cand -eq $di || $cand -eq $gi ]] && cand=$((base+3)); ((cand>=base+size-1))&&cand=$((base+5)); echo "$(int2ip "$cand")/$p"; }
+
+if [ $# -lt 1 ]; then usage; fi
+if [ "$1" = "--pair" ]; then [ $# -eq 3 ] || usage; IP="$2"; GW="$3"; PREF=$(prefix_from_pair "$IP" "$GW")
+else
+  ARG1="$1"; IP="${ARG1%/*}"; SUF="${ARG1#*/}"; GW="${2:-}"
+  if [[ "$ARG1" == */* ]]; then PREF="$SUF"
+  elif [[ -n "${2:-}" && "$2" == *.*.*.* ]]; then PREF="$(mask2cidr "$2")"
+  elif [[ -n "${2:-}" && "$2" != *.*.*.* ]]; then PREF="$(prefix_from_pair "$IP" "$2")"; GW="$2"
+  else PREF=24
+  fi
+fi
+
+NET=$(net_of "$IP" "$PREF"); MASK=$(cidr2mask "$PREF"); BC=$(bcast_of "$IP" "$PREF")
+# hosts & range
+SIZE=$((1<<(32-PREF)))
+if (( PREF==32 )); then HOSTMIN="$IP"; HOSTMAX="$IP"; HOSTS=1
+elif (( PREF==31 )); then HOSTMIN="$NET"; HOSTMAX="$BC"; HOSTS=2
+else HOSTMIN=$(int2ip $(( $(ip2int "$NET")+1 ))); HOSTMAX=$(int2ip $(( $(ip2int "$BC")-1 ))); HOSTS=$(( SIZE-2 ))
+fi
+# wildcard
+NM=$(( (0xFFFFFFFF << (32-PREF)) & 0xFFFFFFFF )); WC=$(int2ip $(( (~NM) & 0xFFFFFFFF )))
+ALIAS=$(pick_alias "$NET" "$PREF" "$IP" "${GW:-}")
+
+cat <<OUT
+IP:            $IP
+Mask:          $MASK (/$$PREF)
+Wildcard:      $WC
+Network:       $NET/$PREF
+Broadcast:     $BC
+HostMin:       $HOSTMIN
+HostMax:       $HOSTMAX
+Hosts usable:  $HOSTS
+Block size:    $SIZE
+
+Suggested alias: $ALIAS   ${LAN_IF:+(on ${LAN_IF})}
+${GW:+Given gateway: $GW}
+Hints:
+  - Add alias:   fieldtool run ip-alias add $ALIAS ${LAN_IF:-eth0}
+  - Smart bridge:fieldtool run smart-bridge $IP $MASK ${GW:-}
+OUT

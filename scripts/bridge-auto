@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
+OUT_IF="${LAN_IF:-eth0}"; AP_IF="${AP_IF:-wlan0}"
+ip2int(){ IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+int2ip(){ local x=$1; printf "%d.%d.%d.%d" $(((x>>24)&255)) $(((x>>16)&255)) $(((x>>8)&255)) $((x&255)); }
+net_of(){ local ip="$1" p="$2" i m; i=$(ip2int "$ip"); m=$(( (0xFFFFFFFF << (32-p)) & 0xFFFFFFFF )); int2ip $(( i & m )); }
+pick_alias(){ local net="$1" p="$2" dev="$3"; local base=$(ip2int "$net") size=$((1<<(32-p)))
+  local cand=$((base+2)); local di=$(ip2int "$dev"); [ $cand -eq $di ] && cand=$((base+3))
+  (( cand >= base+size-1 )) && cand=$((base+5)); echo "$(int2ip "$cand")/$p"
+}
+have(){ command -v "$1" >/dev/null 2>&1; }
+DEV_IP="${1:-}"; [ -z "$DEV_IP" ] && { echo "Usage: bridge-auto <DEVICE_IP>" >&2; exit 1; }
+sudo ip link set "$OUT_IF" up || true
+CAND_PREFS=(30 29 28 27 26 25 24 23)
+FOUND_NET=""; FOUND_PREF=""; FOUND_ALIAS=""; FOUND_ALIAS_IP=""; PROBE_LBL="${OUT_IF}:probe"
+probe(){ local src="$1" host="$2"
+  if command -v arping >/dev/null 2>&1; then sudo arping -I "$OUT_IF" -c 2 -w 2 "$host" >/dev/null 2>&1 && return 0; fi
+  ping -c1 -W1 -I "$src" "$host" >/dev/null 2>&1 && return 0
+  for p in 80 443 8080 554; do timeout 1 bash -c "exec 3<>/dev/tcp/$host/$p" >/dev/null 2>&1 && { exec 3>&-; return 0; }; done
+  return 1
+}
+for P in "${CAND_PREFS[@]}"; do
+  NET=$(net_of "$DEV_IP" "$P"); ALIAS_CIDR=$(pick_alias "$NET" "$P" "$DEV_IP"); ALIAS_IP="${ALIAS_CIDR%/*}"
+  sudo ip addr replace "$ALIAS_CIDR" dev "$OUT_IF" label "$PROBE_LBL"
+  if probe "$ALIAS_IP" "$DEV_IP"; then FOUND_NET="$NET"; FOUND_PREF="$P"; FOUND_ALIAS="$ALIAS_CIDR"; FOUND_ALIAS_IP="$ALIAS_IP"; break; fi
+done
+sudo ip addr del "$ALIAS_CIDR" dev "$OUT_IF" label "$PROBE_LBL" 2>/dev/null || true
+[ -z "$FOUND_PREF" ] && { echo "[ERR] Could not reach $DEV_IP via $OUT_IF" >&2; exit 1; }
+/opt/fieldtool/scripts/ip-alias add "$FOUND_ALIAS" "$OUT_IF" >/dev/null || true
+/opt/fieldtool/scripts/cam-bridge stop >/dev/null 2>&1 || true
+/opt/fieldtool/scripts/cam-bridge start "$AP_IF" "$OUT_IF" "$FOUND_NET/$FOUND_PREF" >/dev/null || true
+sudo nft add table ip smartnat 2>/dev/null || true
+sudo nft flush chain ip smartnat post 2>/dev/null || true
+sudo nft add chain ip smartnat post '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+sudo nft add rule ip smartnat post oifname "$OUT_IF" ip daddr "$FOUND_NET/$FOUND_PREF" snat to "$FOUND_ALIAS_IP"
+sudo sysctl -q -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf."$OUT_IF".rp_filter=0 net.ipv4.conf."$AP_IF".rp_filter=0 >/dev/null
+echo "[BRIDGE] AP($AP_IF) → $OUT_IF on $FOUND_NET/$FOUND_PREF; SNAT via $FOUND_ALIAS_IP"
+echo "[HINT] From laptop on AP: http://$DEV_IP"
