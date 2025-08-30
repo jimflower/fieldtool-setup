@@ -1,0 +1,17 @@
+[connection]
+id=preconfigured
+uuid=7a3f7008-8e50-4932-b0de-c1d6c910d4a2
+type=wifi
+[wifi]
+mode=infrastructure
+ssid=ORBI13
+hidden=true
+[ipv4]
+method=auto
+[ipv6]
+addr-gen-mode=default
+method=auto
+[proxy]
+[wifi-security]
+key-mgmt=wpa-psk
+psk=REPLACE_ME

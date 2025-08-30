@@ -1,72 +1,69 @@
 #!/usr/bin/env bash
-# watch-boot [seconds] — ARP-only, auto-alias, quick probe, print ssh -L
-set -euo pipefail
-. /opt/fieldtool/config.env
-SCRIPTS="/opt/fieldtool/scripts"
-IFACE="$("$SCRIPTS/iface-detect")"
-DUR="${1:-120}"
+set -Eeuo pipefail
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 
-LOG="/var/log/fieldtool/watch-boot_$(date +%F_%H-%M-%S).log"
-echo "[INFO] Interface: $IFACE"
-echo "[INFO] Power-cycle the device now. Listening ${DUR}s for ARP probes/gratuitous ARP..."
+IN_IF="${LAN_IF:-eth0}"
+TIMEOUT=120
+PROBE_IP=""
+SCRIPTS_DIR="${SCRIPTS_DIR:-/opt/fieldtool/scripts}"
 
-DEVICE_IP=""
-# Use process substitution so the while-loop runs in the current shell
-while IFS= read -r L; do
-  if [[ $L =~ who-has[[:space:]]([0-9\.]+)[[:space:]]tell[[:space:]]([0-9\.]+) ]]; then
-    ip="${BASH_REMATCH[1]}"; tell="${BASH_REMATCH[2]}"
-    echo "[DBG] ARP who-has ${ip} tell ${tell}"
-    if [[ "$ip" == "$tell" || "$tell" == "0.0.0.0" ]]; then
-      DEVICE_IP="$ip"
-      echo "[DETECT] Device IP: $DEVICE_IP"
-      break
-    fi
+# Args: -i/--iface IF, -t/--timeout SECS, -p/--probe IP
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--iface)   IN_IF="${2:-$IN_IF}"; shift 2;;
+    -t|--timeout) TIMEOUT="${2:-$TIMEOUT}"; shift 2;;
+    -p|--probe)   PROBE_IP="${2:-}"; shift 2;;
+    *) shift;;
+  esac
+done
+[[ "$TIMEOUT" =~ ^[0-9]+$ ]] || TIMEOUT=120
+
+echo "[INFO] Interface: $IN_IF"
+echo "[INFO] Power-cycle the device now. Listening ${TIMEOUT}s for ARP/DHCP…"
+
+sudo mkdir -p /run/fieldtool 2>/dev/null || true
+FILTER='arp or (udp and (port 67 or 68)) or (vlan and (arp or (udp and (port 67 or 68))))'
+
+# Optional active ARP probe (helps quiet devices)
+if [[ -n "$PROBE_IP" ]]; then
+  (
+    for _ in {1..15}; do
+      sudo arping -I "$IN_IF" -c 2 -w 2 "$PROBE_IP" >/dev/null 2>&1 || true
+      sleep 2
+    done
+  ) &
+fi
+
+while IFS= read -r line; do
+  [[ "${DEBUG:-0}" != "0" ]] && echo "[DBG] $line"
+  ip=""
+
+  # DHCP OFFER/ACK: 'Your-IP X.X.X.X'
+  if [[ "$line" == *"Your-IP "* ]]; then
+    if [[ "$line" =~ Your-IP[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then ip="${BASH_REMATCH[1]}"; fi
+
+  # ARP Reply: use the replied IP
+  elif [[ "$line" == *"ARP"* && "$line" == *"Reply"* && "$line" == *"is-at"* ]]; then
+    if [[ "$line" =~ Reply[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)[[:space:]]+is-at ]]; then ip="${BASH_REMATCH[1]}"; fi
+
+  # ARP Request: prefer 'tell X' if present & not 0.0.0.0, else use 'who-has Y'
+  elif [[ "$line" == *"ARP"* && "$line" == *"who-has"* ]]; then
+    tellIP=""; whoIP=""
+    if [[ "$line" =~ who-has[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then whoIP="${BASH_REMATCH[1]}"; fi
+    if [[ "$line" =~ tell[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then tellIP="${BASH_REMATCH[1]}"; fi
+    if [[ -n "$tellIP" && "$tellIP" != "0.0.0.0" ]]; then ip="$tellIP"
+    else ip="$whoIP"; fi
   fi
-done < <(sudo timeout "$DUR" tcpdump -ni "$IFACE" -l -vvv arp 2>/dev/null | tee "$LOG")
 
-if [ -z "${DEVICE_IP:-}" ]; then
-  echo "[WARN] No ARP probe/self-ARP detected. Saved capture: $LOG"
-  exit 1
-fi
+  if [[ -n "$ip" ]]; then
+    echo "[DETECT] Device IP: $ip"
+    echo "$ip" | sudo tee /run/fieldtool/last_detected_ip >/dev/null
+    echo "[INFO] Handing off to bridge-auto: $SCRIPTS_DIR/bridge-auto -i $IN_IF $ip"
+    "$SCRIPTS_DIR/bridge-auto" -i "$IN_IF" "$ip"
+    exit 0
+  fi
+done < <(sudo timeout "${TIMEOUT}s" tcpdump -ni "$IN_IF" -vv -s0 -l "$FILTER" 2>/dev/null | stdbuf -oL tr -d '\r')
 
-SUBNET24="${DEVICE_IP%.*}.0/24"
-added=$("$SCRIPTS/ip-alias" add "auto:$SUBNET24" "$IFACE" | awk -F= '/ADDED_ALIAS/{print $2}')
-echo "[INFO] Added temporary alias: ${added:-$SUBNET24} on $IFACE"
-if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then 
-  /opt/fieldtool/scripts/cam-bridge start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true; 
-  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)"; 
-fi
-# Auto-start bridge from AP->eth to the detected /24 if enabled
-
-if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then
-
-  ""/opt/fieldtool/scripts/cam-bridge"" start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true
-
-  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)";
-
-fi
-# Auto-start bridge from AP->eth to the detected /24 if enabled
-
-if [ "${FT_AUTOBRIDGE:-1}" = "1" ]; then
-
-  ""/opt/fieldtool/scripts/cam-bridge"" start wlan0 "$IFACE" "$SUBNET24" >/dev/null 2>&1 || true
-
-  echo "[INFO] Auto-bridge enabled for $SUBNET24 (AP → $IFACE)";
-
-fi
-
-if command -v nmap >/dev/null 2>&1; then
-  echo "[INFO] Probing $DEVICE_IP ..."
-  sudo nmap -Pn -n -e "$IFACE" -p 80,443,22,554,8000-8100 --open "$DEVICE_IP" || true
-fi
-
-DEV_PREFIX="${DEVICE_IP%.*}."
-MGMT_IP="$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | grep -v "^${DEV_PREFIX}" | head -n1)"
-[ -z "$MGMT_IP" ] && MGMT_IP="<your-pi-address>"
-
-echo
-echo "[NEXT] On YOUR LAPTOP:"
-echo "  ssh -L 8080:${DEVICE_IP}:80 pi@${MGMT_IP}"
-echo "  # then open: http://localhost:8080"
-echo
-echo "[INFO] Log saved: $LOG"
+echo "[ERR] No ARP/DHCP seen within ${TIMEOUT}s on ${IN_IF}."
+echo "[HINT] If you know a device IP, retry with: $0 -i $IN_IF -t $TIMEOUT -p <ip>"
+exit 1

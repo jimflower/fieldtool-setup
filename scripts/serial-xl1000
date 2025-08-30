@@ -1,9 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
-. /opt/fieldtool/config.env
-DEV="${1:-$XL1000_DEV}"
-BAUD="${2:-$XL1000_BAUD}"
-sudo sed -i "s|^pu port .*|pu port             $DEV|" /etc/minicom/minirc.xl1000
-sudo sed -i "s|^pu baudrate .*|pu baudrate         $BAUD|" /etc/minicom/minirc.xl1000
-echo "[INFO] XL1000 console on ${DEV} @ ${BAUD} (Ctrl-A X to exit)"
-minicom xl1000 -o
+# optional config
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
+
+BAUD="${SERIAL_BAUD_XL1000:-115200}"
+REQ_DEV="${1:-}"             # allow override: serial-xl1000 /dev/ttyUSB0 [screen|minicom|picocom]
+TOOL="${2:-screen}"          # default to screen
+
+resolve_dev() {
+  local d
+  # explicit arg?
+  if [[ -n "$REQ_DEV" ]]; then echo "$REQ_DEV"; return 0; fi
+  # prefer configured glob (e.g. /dev/serial/by-id/*FTDI*if00*)
+  if [[ -n "${XL1000_TTY_GLOB:-}" ]]; then
+    d=$(ls $XL1000_TTY_GLOB 2>/dev/null | head -n1 || true)
+    [[ -n "$d" ]] && { echo "$d"; return 0; }
+  fi
+  # by-id candidates
+  mapfile -t CAND < <(ls /dev/serial/by-id/* 2>/dev/null || true)
+  if ((${#CAND[@]}==1)); then echo "${CAND[0]}"; return 0; fi
+  if ((${#CAND[@]}>1)); then
+    echo "Select USB serial device:" 1>&2
+    local i=1; for c in "${CAND[@]}"; do echo "  $i) $c" 1>&2; ((i++)); done
+    while true; do
+      read -rp "Choice: " s
+      [[ "$s" =~ ^[0-9]+$ ]] && ((s>=1 && s<=${#CAND[@]})) && { echo "${CAND[s-1]}"; return 0; }
+      echo "Invalid selection." 1>&2
+    done
+  fi
+  # fallback to ttyUSB/ACM
+  for k in /dev/ttyUSB* /dev/ttyACM*; do [[ -e "$k" ]] && { echo "$k"; return 0; }; done
+  echo "[ERR] No serial device found." 1>&2; exit 2
+}
+
+DEV="$(resolve_dev)"
+TTY="$(readlink -f "$DEV")"
+
+echo "[INFO] Using $TTY @ ${BAUD} 8N1 (no flow control)"
+# prep TTY
+sudo stty -F "$TTY" "$BAUD" cs8 -parenb -cstopb -ixon -ixoff -crtscts -echo -icrnl -inlcr -opost || true
+# lower FTDI latency if applicable
+if [[ "$TTY" =~ /ttyUSB ]]; then
+  bname="$(basename "$TTY")"
+  echo 1 | sudo tee /sys/bus/usb-serial/devices/"$bname"/latency_timer >/dev/null 2>&1 || true
+fi
+
+case "$TOOL" in
+  screen)  echo "[INFO] Quit: Ctrl-A then K, then Y"; exec screen -L "$TTY" "$BAUD" ;;
+  minicom) exec sudo minicom -b "$BAUD" -o -D "$TTY" ;;
+  picocom) exec sudo picocom -b "$BAUD" -l --imap lfcrlf "$TTY" ;;
+  *) echo "[ERR] Unknown tool '$TOOL' (use: screen|minicom|picocom)"; exit 2 ;;
+esac

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 SSID=$(nmcli -t -f NAME con show --active | grep -Fx fieldtool-ap || true)
 echo "=== AP Status ==="

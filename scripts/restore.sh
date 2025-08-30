@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 TGZ="${1:-}"
 if [ -z "$TGZ" ]; then

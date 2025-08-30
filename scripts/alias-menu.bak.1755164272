@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
+# alias-menu [iface]
+# Lists FieldTool temp aliases and lets you select which to delete.
+set -euo pipefail
+SCRIPTS="/opt/fieldtool/scripts"
+IFACE="${1:-$("$SCRIPTS/iface-detect")}"
+STATE="/run/fieldtool/alias_${IFACE}.txt"
+
+# Collect candidates: addresses with label IFACE:cam + remembered alias (if present)
+CIDRS=()
+LABELS=()
+
+while IFS= read -r line; do
+  cidr="$(awk '{print $4}' <<<"$line")"
+  label="$(sed -n 's/.* label \([^ ]*\).*/\1/p' <<<"$line")"
+  CIDRS+=("$cidr"); LABELS+=("${label:-}")
+done < <(ip -o -4 addr show dev "$IFACE" | grep -E "label ${IFACE}:cam" || true)
+
+if [[ -s "$STATE" ]]; then
+  remembered="$(cat "$STATE")"
+  if ip -o -4 addr show dev "$IFACE" | awk '{print $4}' | grep -qx "$remembered"; then
+    # add if not already listed
+    if ! printf '%s\n' "${CIDRS[@]}" | grep -qx "$remembered"; then
+      CIDRS+=("$remembered"); LABELS+=("(remembered)")
+    fi
+  fi
+fi
+
+if [[ ${#CIDRS[@]} -eq 0 ]]; then
+  echo "[INFO] No FieldTool temp aliases found on $IFACE."
+  echo "Tip: view all addresses with: ip -o -4 addr show dev $IFACE"
+  exit 0
+fi
+
+echo "Temp aliases on $IFACE:"
+for i in "${!CIDRS[@]}"; do
+  printf "  %d) %-18s %s\n" $((i+1)) "${CIDRS[$i]}" "${LABELS[$i]}"
+done
+echo
+read -rp "Delete which? (numbers, space-separated; 'a'=all; 'q'=cancel): " choice
+
+if [[ -z "$choice" || "$choice" =~ ^[Qq]$ ]]; then
+  echo "Cancelled."; exit 0
+fi
+
+if [[ "$choice" =~ ^[Aa]$ ]]; then
+  idxs="$(seq 1 ${#CIDRS[@]})"
+else
+  idxs="$choice"
+fi
+
+for n in $idxs; do
+  if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#CIDRS[@]} )); then
+    cidr="${CIDRS[$((n-1))]}"
+    echo "[INFO] Removing $cidr from $IFACE"
+    sudo ip addr del "$cidr" dev "$IFACE" || true
+    # Clear remembered state if it matches
+    [[ -s "$STATE" && "$(cat "$STATE")" == "$cidr" ]] && : > "$STATE"
+  else
+    echo "[WARN] Skipping invalid selection: $n"
+  fi
+done
+
+echo
+echo "[INFO] Current addresses on $IFACE:"
+ip -o -4 addr show dev "$IFACE" | sed -n 's/^/  /p'

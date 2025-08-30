@@ -1,66 +1,45 @@
 #!/usr/bin/env bash
-# alias-menu [iface]
-# Lists FieldTool temp aliases and lets you select which to delete.
-set -euo pipefail
-SCRIPTS="/opt/fieldtool/scripts"
-IFACE="${1:-$("$SCRIPTS/iface-detect")}"
-STATE="/run/fieldtool/alias_${IFACE}.txt"
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
+set -Eeuo pipefail
+IF="${1:-eth0}"
 
-# Collect candidates: addresses with label IFACE:cam + remembered alias (if present)
-CIDRS=()
-LABELS=()
+echo "=== Temp aliases on $IF ==="
+# Strip any trailing "\" that ip might print when wrapping
+mapfile -t ENTRIES < <(
+  ip -o -4 addr show dev "$IF" 2>/dev/null | sed 's/\\$//' | \
+  awk -v ifc="$IF" '
+    {
+      cidr=$4; label="";
+      for(i=1;i<=NF;i++){
+        if ($i ~ "^"ifc":"){ label=$i; sub(/\\$/,"",label); break }
+      }
+      if (label != "") { print cidr" "label }
+    }'
+)
 
-while IFS= read -r line; do
-  cidr="$(awk '{print $4}' <<<"$line")"
-  label="$(sed -n 's/.* label \([^ ]*\).*/\1/p' <<<"$line")"
-  CIDRS+=("$cidr"); LABELS+=("${label:-}")
-done < <(ip -o -4 addr show dev "$IFACE" | grep -E "label ${IFACE}:cam" || true)
-
-if [[ -s "$STATE" ]]; then
-  remembered="$(cat "$STATE")"
-  if ip -o -4 addr show dev "$IFACE" | awk '{print $4}' | grep -qx "$remembered"; then
-    # add if not already listed
-    if ! printf '%s\n' "${CIDRS[@]}" | grep -qx "$remembered"; then
-      CIDRS+=("$remembered"); LABELS+=("(remembered)")
-    fi
-  fi
-fi
-
-if [[ ${#CIDRS[@]} -eq 0 ]]; then
-  echo "[INFO] No FieldTool temp aliases found on $IFACE."
-  echo "Tip: view all addresses with: ip -o -4 addr show dev $IFACE"
+if (( ${#ENTRIES[@]} == 0 )); then
+  echo "[INFO] No FieldTool-labelled aliases found on $IF."
+  echo "Tip: add one with: fieldtool run ip-alias add auto:192.168.8.0/24 $IF"
   exit 0
 fi
 
-echo "Temp aliases on $IFACE:"
-for i in "${!CIDRS[@]}"; do
-  printf "  %d) %-18s %s\n" $((i+1)) "${CIDRS[$i]}" "${LABELS[$i]}"
-done
-echo
-read -rp "Delete which? (numbers, space-separated; 'a'=all; 'q'=cancel): " choice
-
-if [[ -z "$choice" || "$choice" =~ ^[Qq]$ ]]; then
-  echo "Cancelled."; exit 0
-fi
-
-if [[ "$choice" =~ ^[Aa]$ ]]; then
-  idxs="$(seq 1 ${#CIDRS[@]})"
-else
-  idxs="$choice"
-fi
-
-for n in $idxs; do
-  if [[ "$n" =~ ^[0-9]+$ ]] && (( n>=1 && n<=${#CIDRS[@]} )); then
-    cidr="${CIDRS[$((n-1))]}"
-    echo "[INFO] Removing $cidr from $IFACE"
-    sudo ip addr del "$cidr" dev "$IFACE" || true
-    # Clear remembered state if it matches
-    [[ -s "$STATE" && "$(cat "$STATE")" == "$cidr" ]] && : > "$STATE"
-  else
-    echo "[WARN] Skipping invalid selection: $n"
-  fi
+for i in "${!ENTRIES[@]}"; do
+  printf "%d) %s\n" $((i+1)) "${ENTRIES[$i]}"
 done
 
-echo
-echo "[INFO] Current addresses on $IFACE:"
-ip -o -4 addr show dev "$IFACE" | sed -n 's/^/  /p'
+read -rp "Select number to delete (or Enter to exit): " sel
+[[ -z "${sel:-}" ]] && exit 0
+idx=$((sel-1))
+if (( idx < 0 || idx >= ${#ENTRIES[@]} )); then
+  echo "[ERR] Invalid selection"; exit 2
+fi
+
+cidr=$(awk '{print $1}' <<<"${ENTRIES[$idx]}")
+label=$(awk '{print $2}' <<<"${ENTRIES[$idx]}")
+
+# Delete; prefer using the label to remove the exact alias
+if ! sudo ip addr del "$cidr" dev "$IF" label "$label" 2>/dev/null; then
+  # fallback without label if kernel doesn’t require it
+  sudo ip addr del "$cidr" dev "$IF"
+fi
+echo "[OK] Removed $cidr ($label)"

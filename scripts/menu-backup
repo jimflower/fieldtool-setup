@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -uo pipefail
 SCRIPTS_DIR="/opt/fieldtool/scripts"
 ACTION="${1:-download}"

@@ -1,39 +1,108 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# become root so menu calls work
+if [[ $EUID -ne 0 ]]; then exec sudo -E "$0" "$@"; fi
+
 [ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
-OUT_IF="${LAN_IF:-eth0}"; AP_IF="${AP_IF:-wlan0}"
-ip2int(){ IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
-int2ip(){ local x=$1; printf "%d.%d.%d.%d" $(((x>>24)&255)) $(((x>>16)&255)) $(((x>>8)&255)) $((x&255)); }
-net_of(){ local ip="$1" p="$2" i m; i=$(ip2int "$ip"); m=$(( (0xFFFFFFFF << (32-p)) & 0xFFFFFFFF )); int2ip $(( i & m )); }
-pick_alias(){ local net="$1" p="$2" dev="$3"; local base=$(ip2int "$net") size=$((1<<(32-p)))
-  local cand=$((base+2)); local di=$(ip2int "$dev"); [ $cand -eq $di ] && cand=$((base+3))
-  (( cand >= base+size-1 )) && cand=$((base+5)); echo "$(int2ip "$cand")/$p"
-}
-have(){ command -v "$1" >/dev/null 2>&1; }
-DEV_IP="${1:-}"; [ -z "$DEV_IP" ] && { echo "Usage: bridge-auto <DEVICE_IP>" >&2; exit 1; }
-sudo ip link set "$OUT_IF" up || true
-CAND_PREFS=(30 29 28 27 26 25 24 23)
-FOUND_NET=""; FOUND_PREF=""; FOUND_ALIAS=""; FOUND_ALIAS_IP=""; PROBE_LBL="${OUT_IF}:probe"
-probe(){ local src="$1" host="$2"
-  if command -v arping >/dev/null 2>&1; then sudo arping -I "$OUT_IF" -c 2 -w 2 "$host" >/dev/null 2>&1 && return 0; fi
-  ping -c1 -W1 -I "$src" "$host" >/dev/null 2>&1 && return 0
-  for p in 80 443 8080 554; do timeout 1 bash -c "exec 3<>/dev/tcp/$host/$p" >/dev/null 2>&1 && { exec 3>&-; return 0; }; done
-  return 1
-}
-for P in "${CAND_PREFS[@]}"; do
-  NET=$(net_of "$DEV_IP" "$P"); ALIAS_CIDR=$(pick_alias "$NET" "$P" "$DEV_IP"); ALIAS_IP="${ALIAS_CIDR%/*}"
-  sudo ip addr replace "$ALIAS_CIDR" dev "$OUT_IF" label "$PROBE_LBL"
-  if probe "$ALIAS_IP" "$DEV_IP"; then FOUND_NET="$NET"; FOUND_PREF="$P"; FOUND_ALIAS="$ALIAS_CIDR"; FOUND_ALIAS_IP="$ALIAS_IP"; break; fi
+
+OUT_IF=""; FORCE_MASK=""; FORCE_ALIAS=""; DEV_IP=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--iface) OUT_IF="$2"; shift 2;;
+    --mask) FORCE_MASK="$2"; shift 2;;
+    --alias-ip) FORCE_ALIAS="$2"; shift 2;;
+    *) DEV_IP="$1"; shift;;
+  esac
 done
-sudo ip addr del "$ALIAS_CIDR" dev "$OUT_IF" label "$PROBE_LBL" 2>/dev/null || true
-[ -z "$FOUND_PREF" ] && { echo "[ERR] Could not reach $DEV_IP via $OUT_IF" >&2; exit 1; }
-/opt/fieldtool/scripts/ip-alias add "$FOUND_ALIAS" "$OUT_IF" >/dev/null || true
-/opt/fieldtool/scripts/cam-bridge stop >/dev/null 2>&1 || true
-/opt/fieldtool/scripts/cam-bridge start "$AP_IF" "$OUT_IF" "$FOUND_NET/$FOUND_PREF" >/dev/null || true
-sudo nft add table ip smartnat 2>/dev/null || true
-sudo nft flush chain ip smartnat post 2>/dev/null || true
-sudo nft add chain ip smartnat post '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-sudo nft add rule ip smartnat post oifname "$OUT_IF" ip daddr "$FOUND_NET/$FOUND_PREF" snat to "$FOUND_ALIAS_IP"
-sudo sysctl -q -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf."$OUT_IF".rp_filter=0 net.ipv4.conf."$AP_IF".rp_filter=0 >/dev/null
-echo "[BRIDGE] AP($AP_IF) → $OUT_IF on $FOUND_NET/$FOUND_PREF; SNAT via $FOUND_ALIAS_IP"
-echo "[HINT] From laptop on AP: http://$DEV_IP"
+OUT_IF="${OUT_IF:-${LAN_IF:-eth0}}"
+[[ -n "${DEV_IP:-}" ]] || { echo "[ERR] Usage: $0 -i <iface> [--mask N] [--alias-ip X] <device-ip>"; exit 2; }
+ip link set "$OUT_IF" up || true
+
+calc_net() {
+  python3 - "$1" "$2" <<'PY'
+import sys, ipaddress
+ip=sys.argv[1]; n=int(sys.argv[2])
+net=ipaddress.ip_network(f"{ip}/{n}", strict=False)
+hosts=list(net.hosts())
+gw  = str(hosts[0]) if hosts else str(net.network_address+1)
+alt = str(hosts[1]) if len(hosts)>1 else gw
+print(str(net.network_address), str(net.netmask), gw, alt)
+PY
+}
+
+flush_cam_aliases() {
+  ip -o -4 addr show dev "$OUT_IF" | awk '$0 ~ /'"$OUT_IF"':cam/ {print $4}' \
+  | xargs -r -n1 ip addr del dev "$OUT_IF"
+}
+
+ensure_alias_only() {
+  local alias="$1" mask="$2" net="$3"
+  flush_cam_aliases
+  ip addr add "$alias/$mask" dev "$OUT_IF" label "$OUT_IF:cam"
+  # ensure a connected route that uses this alias as src
+  ip route replace "$net/$mask" dev "$OUT_IF" src "$alias" scope link
+}
+
+has_neigh() {
+  ip neigh show to "$1" dev "$OUT_IF" | grep -qE 'lladdr|REACHABLE|STALE|DELAY'
+}
+
+try_contact() {
+  local alias="$1" ipt="$2"
+  ip neigh flush to "$ipt" dev "$OUT_IF" >/dev/null 2>&1 || true
+  # ARP request with explicit sender IP
+  arping -I "$OUT_IF" -S "$alias" -c 2 -w 2 "$ipt" >/dev/null 2>&1 && return 0
+  # Some devices answer only to plain who-has:
+  arping -I "$OUT_IF" -c 2 -w 2 "$ipt"           >/dev/null 2>&1 && return 0
+  # ICMP from the alias
+  ping -c1 -W1 -I "$alias" "$ipt"                >/dev/null 2>&1 && return 0
+  # Finally, neighbor table says we learned it
+  has_neigh "$ipt"
+}
+
+start_bridge() {
+  local net_cidr="$1"
+  if [ -x /opt/fieldtool/scripts/cam-bridge ]; then
+    /opt/fieldtool/scripts/cam-bridge start "${AP_IF:-wlan0}" "$OUT_IF" "$net_cidr" || true
+    /opt/fieldtool/scripts/cam-bridge status || true
+  else
+    echo "[NOTE] cam-bridge not found; alias up on $OUT_IF for $net_cidr"
+  fi
+}
+
+echo "[DBG] Using OUT_IF=$OUT_IF for DEV_IP=$DEV_IP" >&2
+
+if [[ -n "$FORCE_MASK" ]]; then
+  read NET _ GW _ < <(calc_net "$DEV_IP" "$FORCE_MASK")
+  ALIAS_IP="${FORCE_ALIAS:-$GW}"
+  ensure_alias_only "$ALIAS_IP" "$FORCE_MASK" "$NET"
+  if try_contact "$ALIAS_IP" "$DEV_IP"; then
+    echo "[OK] Forced /$FORCE_MASK via alias $ALIAS_IP"
+    start_bridge "$NET/$FORCE_MASK"; exit 0
+  else
+    echo "[ERR] Forced /$FORCE_MASK didn’t resolve ARP on $OUT_IF"; exit 1
+  fi
+fi
+
+for m in 30 29 28 27 26 25 24 23; do
+  read NET _ GW ALT < <(calc_net "$DEV_IP" "$m")
+
+  # try gateway first
+  ensure_alias_only "$GW" "$m" "$NET"
+  echo "[DBG] Try NET=$NET/$m via alias $GW/$m" >&2
+  if try_contact "$GW" "$DEV_IP"; then
+    echo "[OK] Inferred subnet: $NET/$m (alias $GW/$m on $OUT_IF)"
+    start_bridge "$NET/$m"; exit 0
+  fi
+
+  # fallback to the next host
+  ensure_alias_only "$ALT" "$m" "$NET"
+  echo "[DBG] Fallback alias $ALT/$m" >&2
+  if try_contact "$ALT" "$DEV_IP"; then
+    echo "[OK] Inferred subnet: $NET/$m (alias $ALT/$m on $OUT_IF)"
+    start_bridge "$NET/$m"; exit 0
+  fi
+done
+
+echo "[ERR] Could not reach $DEV_IP via $OUT_IF (tried: 30 29 28 27 26 25 24 23)"
+exit 1

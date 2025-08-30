@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# ip-alias add <CIDR|auto:X.Y.Z.0/24> [iface]
+# ip-alias del <CIDR|auto:X.Y.Z.0/24> [iface]
+# ip-alias show [iface]
+set -euo pipefail
+. /opt/fieldtool/config.env
+SCRIPTS="/opt/fieldtool/scripts"
+STATE_DIR="/run/fieldtool"
+mkdir -p "$STATE_DIR"
+
+CMD="${1:-}"; ARG="${2:-}"; IFACE="${3:-$("$SCRIPTS/iface-detect")}"
+STATE_FILE="$STATE_DIR/alias_${IFACE}.txt"
+
+pick_ip_24() {
+  local netcidr="$1"
+  local mask="${netcidr#*/}"
+  [ "$mask" != "24" ] && return 1
+  local prefix="${netcidr%.*}"
+  for last in 10 20 50 100 200; do
+    local cand="${prefix}.${last}/24"
+    ip -br addr show dev "$IFACE" | grep -q "${prefix}\.${last}/24" || { echo "$cand"; return 0; }
+  done
+  echo "${prefix}.250/24"
+}
+
+case "$CMD" in
+  add)
+    [ -z "${ARG:-}" ] && { echo "Need CIDR"; exit 2; }
+    if [[ "$ARG" == auto:* ]]; then
+      NET="${ARG#auto:}"
+      ALIAS=$(pick_ip_24 "$NET") || { echo "Only /24 supported for auto"; exit 2; }
+    else
+      ALIAS="$ARG"
+    fi
+    echo "[INFO] Adding $ALIAS on $IFACE (label ${IFACE}:cam)"
+    sudo ip addr add "$ALIAS" dev "$IFACE" label "${IFACE}:cam"
+    echo "$ALIAS" > "$STATE_FILE"
+    echo "ADDED_ALIAS=$ALIAS"
+    ip addr show dev "$IFACE"
+    ;;
+  del)
+    target="$ARG"
+    if [[ "$target" == auto:* ]] || [ -z "${target:-}" ]; then
+      # Use remembered alias if present
+      if [ -s "$STATE_FILE" ]; then
+        target="$(cat "$STATE_FILE")"
+      else
+        # Fallback: remove any address in that /24
+        NET="${ARG#auto:}"; prefix="${NET%.*}"
+        while read -r line; do
+          addr=$(awk '{print $3}' <<<"$line")
+          [[ "$addr" == $prefix.* ]] && { echo "[INFO] Removing $addr"; sudo ip addr del "$addr" dev "$IFACE" || true; }
+        done < <(ip -o addr show dev "$IFACE" | grep -F "$prefix.")
+        : > "$STATE_FILE"
+        ip addr show dev "$IFACE"
+        exit 0
+      fi
+    fi
+    echo "[INFO] Removing $target from $IFACE"
+    sudo ip addr del "$target" dev "$IFACE" || true
+    : > "$STATE_FILE"
+    ip addr show dev "$IFACE"
+    ;;
+  show|"")
+    ip addr show dev "$IFACE"
+    ;;
+  *)
+    echo "Usage: ip-alias {add|del|show} CIDR|auto:X.Y.Z.0/24 [iface]"; exit 2;;
+esac

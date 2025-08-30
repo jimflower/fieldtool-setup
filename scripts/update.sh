@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 cd /opt/fieldtool
 # If this repo was deployed via rsync or tar, you can overlay updates by copying new files here first.

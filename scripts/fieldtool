@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 SCRIPTS_DIR="/opt/fieldtool/scripts"
 [ -d "$SCRIPTS_DIR" ] || { echo "[ERR] Missing $SCRIPTS_DIR"; exit 2; }
@@ -22,9 +23,7 @@ while true; do
   echo "14) Bench DHCP (start/stop/status/watch)"
   echo "15) Logs (list/tail/bundle/serve)"
   echo "16) Backup/export (make/download/serve-start/serve-stop/serve-status)"
-  echo "17) Auto bridge to host IP (infer subnet)"
   echo "18) Internet (wlan1): status/scan/home/field/connect-home/connect-field/prefer-home/prefer-field/wifi-on/wifi-off"
-  echo "19) Subnet calculator"
   echo "L) List scripts"
   echo "Q) Quit"
   echo
@@ -41,8 +40,7 @@ while true; do
     6)  "$SCRIPTS_DIR/alias-menu"; read -r -p "Enter to continue..." ;;
     7)  "$SCRIPTS_DIR/open-web"; read -r -p "Enter to continue..." ;;
     8)  "$SCRIPTS_DIR/reverse-ssh"; read -r -p "Enter to continue..." ;;
-    9) in="${LAN_IF:-eth0}"; read -rp "Watch interface [${in}]: " a; a=${a:-$in}; \
-        "$SCRIPTS_DIR/watch-boot" "$a"; read -rp "Enter to continue..." ;;
+    9)  "$SCRIPTS_DIR/watch-boot"; read -r -p "Enter to continue..." ;;
     10) "$SCRIPTS_DIR/ap-status"; read -r -p "Enter to continue..." ;;
     11) "$SCRIPTS_DIR/ap-clients"; read -r -p "Enter to continue..." ;;
     12) read -r -p "(start/stop/status): " a
@@ -63,18 +61,8 @@ while true; do
           serve-status)"$SCRIPTS_DIR/backup" serve-status|| true; read -r -p "Enter to continue..." ;;
           *) echo "Invalid"; read -r -p "Enter to continue..." ;;
         esac ;;
-    17) read -rp "Device IP: " d
-        "$SCRIPTS_DIR/bridge-auto" "$d"
-        read -rp "Enter to continue..." ;;
     18) read -r -p "(status/scan/connect-home [pass]/connect-field [pass]/prefer-home/prefer-field/wifi-on/wifi-off): " a p
         "/opt/fieldtool/scripts/menu-wlan1" "${a}" "${p:-}";;
-    19) read -rp "Enter (IP[/prefix] | IP netmask | IP Gateway): " a b c
-        if [ -n "${c:-}" ]; then "$SCRIPTS_DIR/subnet-calc" --pair "$a" "$c"
-        elif [[ "${b:-}" == *.*.*.* ]]; then "$SCRIPTS_DIR/subnet-calc" "$a" "$b"
-        elif [ -n "${b:-}" ]; then "$SCRIPTS_DIR/subnet-calc" --pair "$a" "$b"
-        else "$SCRIPTS_DIR/subnet-calc" "$a"
-        fi
-        read -rp "Enter to continue..." ;;
     [Ll]) ls -1 "$SCRIPTS_DIR"; read -r -p "Enter to continue..." ;;
     [Qq]) exit 0 ;;
     *)  echo "Invalid"; read -r -p "Enter to continue..." ;;

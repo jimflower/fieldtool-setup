@@ -1,4 +1,5 @@
 # 13) Client route helper
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 sudo tee /opt/fieldtool/scripts/client-route-helper >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

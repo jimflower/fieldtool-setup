@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 IFACE="${1:-eth0}"
 echo "Running arp-scan on $IFACE ..."

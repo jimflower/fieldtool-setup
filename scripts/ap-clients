@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 echo "=== Associated stations on wlan0 ==="
 iw dev wlan0 station dump | awk '

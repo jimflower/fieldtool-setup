@@ -1,0 +1,23 @@
+[connection]
+id=GNB Energy
+uuid=895f7400-6a7d-48c5-9372-976b576d4bd3
+type=wifi
+interface-name=wlan1
+
+[wifi]
+mode=infrastructure
+ssid=GNB Energy
+
+[wifi-security]
+auth-alg=open
+key-mgmt=wpa-psk
+psk=REPLACE_ME
+
+[ipv4]
+method=auto
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+
+[proxy]

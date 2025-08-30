@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$#" -ne 2 ]; then echo "Usage: ipcalc-pair <IP> <GW>" >&2; exit 1; fi
+ip="$1"; gw="$2"
+ip2int(){ IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+int2mask(){ n=$1; m=$(( (0xFFFFFFFF << (32-n)) & 0xFFFFFFFF )); printf "%d.%d.%d.%d\n" $(((m>>24)&255)) $(((m>>16)&255)) $(((m>>8)&255)) $((m&255)); }
+xor=$(( $(ip2int "$ip") ^ $(ip2int "$gw") )); p=32; while ((xor)); do xor=$((xor>>1)); p=$((p-1)); done
+mask=$(int2mask $p)
+ipcalc "$ip" "$mask"

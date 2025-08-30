@@ -1,69 +1,67 @@
 #!/usr/bin/env bash
-# ip-alias add <CIDR|auto:X.Y.Z.0/24> [iface]
-# ip-alias del <CIDR|auto:X.Y.Z.0/24> [iface]
-# ip-alias show [iface]
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
-. /opt/fieldtool/config.env
-SCRIPTS="/opt/fieldtool/scripts"
-STATE_DIR="/run/fieldtool"
-mkdir -p "$STATE_DIR"
 
-CMD="${1:-}"; ARG="${2:-}"; IFACE="${3:-$("$SCRIPTS/iface-detect")}"
-STATE_FILE="$STATE_DIR/alias_${IFACE}.txt"
+usage() {
+  cat <<USG
+Usage:
+  ip-alias add <CIDR|auto:NET/24> [IFACE]     # e.g. add 192.168.8.50/24 eth0  | add auto:192.168.8.0/24 eth0
+  ip-alias del <CIDR> [IFACE]                 # e.g. del 192.168.8.50/24 eth0
+  ip-alias list [IFACE]                       # list aliases on IFACE (default eth0)
 
-pick_ip_24() {
-  local netcidr="$1"
-  local mask="${netcidr#*/}"
-  [ "$mask" != "24" ] && return 1
-  local prefix="${netcidr%.*}"
-  for last in 10 20 50 100 200; do
-    local cand="${prefix}.${last}/24"
-    ip -br addr show dev "$IFACE" | grep -q "${prefix}\.${last}/24" || { echo "$cand"; return 0; }
-  done
-  echo "${prefix}.250/24"
+Hints:
+  - 'auto:NET/24' picks .10 on that subnet (e.g. 192.168.8.10/24).
+  - Defaults: IFACE=eth0, label=\$IFACE:cam
+USG
 }
 
-case "$CMD" in
-  add)
-    [ -z "${ARG:-}" ] && { echo "Need CIDR"; exit 2; }
-    if [[ "$ARG" == auto:* ]]; then
-      NET="${ARG#auto:}"
-      ALIAS=$(pick_ip_24 "$NET") || { echo "Only /24 supported for auto"; exit 2; }
-    else
-      ALIAS="$ARG"
-    fi
-    echo "[INFO] Adding $ALIAS on $IFACE (label ${IFACE}:cam)"
-    sudo ip addr add "$ALIAS" dev "$IFACE" label "${IFACE}:cam"
-    echo "$ALIAS" > "$STATE_FILE"
-    echo "ADDED_ALIAS=$ALIAS"
-    ip addr show dev "$IFACE"
-    ;;
-  del)
-    target="$ARG"
-    if [[ "$target" == auto:* ]] || [ -z "${target:-}" ]; then
-      # Use remembered alias if present
-      if [ -s "$STATE_FILE" ]; then
-        target="$(cat "$STATE_FILE")"
-      else
-        # Fallback: remove any address in that /24
-        NET="${ARG#auto:}"; prefix="${NET%.*}"
-        while read -r line; do
-          addr=$(awk '{print $3}' <<<"$line")
-          [[ "$addr" == $prefix.* ]] && { echo "[INFO] Removing $addr"; sudo ip addr del "$addr" dev "$IFACE" || true; }
-        done < <(ip -o addr show dev "$IFACE" | grep -F "$prefix.")
-        : > "$STATE_FILE"
-        ip addr show dev "$IFACE"
-        exit 0
-      fi
-    fi
-    echo "[INFO] Removing $target from $IFACE"
-    sudo ip addr del "$target" dev "$IFACE" || true
-    : > "$STATE_FILE"
-    ip addr show dev "$IFACE"
-    ;;
-  show|"")
-    ip addr show dev "$IFACE"
-    ;;
-  *)
-    echo "Usage: ip-alias {add|del|show} CIDR|auto:X.Y.Z.0/24 [iface]"; exit 2;;
+add_alias() {
+  local cidr="${1:-}"; local iface="${2:-eth0}"
+  if [[ -z "${cidr}" ]]; then
+    read -rp "Subnet/IP (e.g. auto:192.168.8.0/24 or 192.168.8.50/24): " cidr
+  fi
+  if [[ -z "${iface}" ]]; then
+    read -rp "Interface [eth0]: " iface; iface="${iface:-eth0}"
+  fi
+
+  local ip label="$iface:cam"
+  if [[ "$cidr" == auto:* ]]; then
+    local net="${cidr#auto:}"
+    local base
+    base=$(echo "$net" | awk -F'[./]' '{printf "%s.%s.%s",$1,$2,$3}')
+    ip="${base}.10/24"
+    echo "[INFO] Auto-adding ${ip} on ${iface} (label ${label})"
+  else
+    ip="$cidr"
+    echo "[INFO] Adding ${ip} on ${iface} (label ${label})"
+  fi
+
+  sudo ip link set "$iface" up
+  # add or replace without error spam
+  sudo ip addr add "$ip" dev "$iface" label "$label" 2>/dev/null || \
+  sudo ip addr replace "$ip" dev "$iface" label "$label"
+  ip -br addr show "$iface"
+}
+
+del_alias() {
+  local cidr="${1:-}"; local iface="${2:-eth0}"; local label="$iface:cam"
+  if [[ -z "${cidr}" ]]; then
+    echo "[ERR] Need CIDR to delete (e.g. 192.168.8.50/24)"; return 2
+  fi
+  sudo ip addr del "$cidr" dev "$iface" label "$label"
+  echo "[OK] Removed $cidr from $iface ($label)"
+}
+
+list_aliases() {
+  local iface="${1:-eth0}"
+  ip -br addr show "$iface" || true
+}
+
+act="${1:-}" ; shift || true
+case "${act}" in
+  add)  add_alias "$@" ;;
+  del)  del_alias "$@" ;;
+  list|"") list_aliases "$@" ;;
+  -h|--help) usage ;;
+  *) echo "[ERR] Unknown command: ${act}"; usage; exit 2 ;;
 esac

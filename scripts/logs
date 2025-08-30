@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -euo pipefail
 CMD="${1:-list}"; ARG="${2:-}"
 RUN=/run/fieldtool; LOGDIR=/var/log/fieldtool

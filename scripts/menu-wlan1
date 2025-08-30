@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ -f /opt/fieldtool/config.env ] && . /opt/fieldtool/config.env || true
 set -uo pipefail
 S="/opt/fieldtool/scripts/wlan1-net"
 act="${1:-status}"; pass="${2:-}"
